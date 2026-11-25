@@ -206,11 +206,13 @@ pub fn set_clipboard_text(text: &str) -> Result<()> {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_clipboard_image_png() -> Result<(u32, u32, Vec<u8>)> {
-    use image::codecs::png::PngEncoder;
     use image::ImageEncoder;
+    use image::codecs::png::PngEncoder;
 
     let mut cb = arboard::Clipboard::new().map_err(|e| LierError::Clipboard(e.to_string()))?;
-    let img = cb.get_image().map_err(|e| LierError::Clipboard(e.to_string()))?;
+    let img = cb
+        .get_image()
+        .map_err(|e| LierError::Clipboard(e.to_string()))?;
     let w = img.width as u32;
     let h = img.height as u32;
     let mut png = Vec::new();

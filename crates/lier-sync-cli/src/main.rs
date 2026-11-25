@@ -3,9 +3,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use lier_sync_core::{
-    compare_folder_with_peer, get_clipboard_text, send_clipboard_text, send_quick_batch,
-    start_p2p_server, sync_folder_from_peer, ClipboardGuard, CoreEvent, DeviceIdentity,
-    DiscoveryService, SharedFolderRegistry, DEFAULT_P2P_PORT,
+    ClipboardGuard, CoreEvent, DEFAULT_P2P_PORT, DeviceIdentity, DiscoveryService,
+    SharedFolderRegistry, compare_folder_with_peer, get_clipboard_text, send_clipboard_text,
+    send_quick_batch, start_p2p_server, sync_folder_from_peer,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -127,7 +127,9 @@ async fn main() -> Result<()> {
                             saved_path.display()
                         );
                     }
-                    CoreEvent::ClipboardReceived { from_peer, preview, .. } => {
+                    CoreEvent::ClipboardReceived {
+                        from_peer, preview, ..
+                    } => {
                         println!("[Clipboard] From {from_peer}: {preview}");
                     }
                     CoreEvent::ClipboardImageReceived {
@@ -143,7 +145,10 @@ async fn main() -> Result<()> {
                         );
                     }
                     CoreEvent::PeerPaired(peer) => {
-                        println!("[Security] Paired with {} ({})", peer.device_name, peer.fingerprint);
+                        println!(
+                            "[Security] Paired with {} ({})",
+                            peer.device_name, peer.fingerprint
+                        );
                     }
                     CoreEvent::SyncActivity { folder_id, message } => {
                         println!("[Sync:{folder_id}] {message}");
@@ -164,16 +169,24 @@ async fn main() -> Result<()> {
                 println!("No peers discovered.");
             } else {
                 for p in peers {
-                    println!("• {} ({}) — {} [{}]", p.device_name, p.os, p.addr, p.device_id);
+                    println!(
+                        "• {} ({}) — {} [{}]",
+                        p.device_name, p.os, p.addr, p.device_id
+                    );
                 }
             }
         }
         Commands::Send { files, to } => {
             println!("Sending {} item(s) to {to}...", files.len());
-            let count = send_quick_batch(to, &identity, &files, |idx, total_files, sent, total, name| {
-                let pct = if total > 0 { (sent * 100) / total } else { 100 };
-                print!("\r[{idx}/{total_files}] {name} — {sent}/{total} bytes ({pct}%)   ");
-            })
+            let count = send_quick_batch(
+                to,
+                &identity,
+                &files,
+                |idx, total_files, sent, total, name| {
+                    let pct = if total > 0 { (sent * 100) / total } else { 100 };
+                    print!("\r[{idx}/{total_files}] {name} — {sent}/{total} bytes ({pct}%)   ");
+                },
+            )
             .await?;
             println!("\nDone! Sent {count} file(s).");
         }

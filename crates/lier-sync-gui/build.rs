@@ -25,7 +25,10 @@ fn main() {
 
     match status {
         Ok(s) if s.success() => {
-            println!("cargo:rustc-link-arg-bin=lier-sync-gui={}", res_file.display());
+            println!(
+                "cargo:rustc-link-arg-bin=lier-sync-gui={}",
+                res_file.display()
+            );
         }
         other => {
             println!("cargo:warning=rc.exe failed ({other:?}); continuing without exe resource");

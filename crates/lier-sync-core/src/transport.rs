@@ -1,21 +1,21 @@
 // LierSync — Copyright (C) 2026 LaRevole (LaRCorp) — GPL-3.0-only
 
 use crate::clipboard::{
-    get_clipboard_image_png, get_clipboard_text, set_clipboard_image_png, set_clipboard_text,
-    ClipboardGuard,
+    ClipboardGuard, get_clipboard_image_png, get_clipboard_text, set_clipboard_image_png,
+    set_clipboard_text,
 };
 use crate::config::{SyncDirection, TrustedPeer};
 use crate::discovery::{DiscoveryService, PeerInfo};
 use crate::error::{LierError, Result};
 use crate::identity::DeviceIdentity;
 use crate::merkle::{
-    build_merkle_tree, create_conflict_copy, diff_trees, hash_bytes, hash_file, preview_sync,
-    read_chunk, write_chunk, SyncPreview, CHUNK_SIZE,
+    CHUNK_SIZE, SyncPreview, build_merkle_tree, create_conflict_copy, diff_trees, hash_bytes,
+    hash_file, preview_sync, read_chunk, write_chunk,
 };
-use crate::protocol::{read_frame_with, write_frame_with, Frame};
+use crate::protocol::{Frame, read_frame_with, write_frame_with};
 use crate::security::{
-    derive_shared_secret, generate_ephemeral_keypair, SecurityManager, SecurityPolicy,
-    SessionCipher, StreamRole,
+    SecurityManager, SecurityPolicy, SessionCipher, StreamRole, derive_shared_secret,
+    generate_ephemeral_keypair,
 };
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 pub const DEFAULT_P2P_PORT: u16 = 47789;
@@ -186,8 +186,10 @@ async fn handle_connection(
     let mut peer_name = "Unknown".to_string();
     let mut peer_trusted = !security.whitelist_only();
     let mut cipher = SessionCipher::Plain;
-    let mut active_transfers: HashMap<String, (PathBuf, Option<String>, String, u64, std::fs::File)> =
-        HashMap::new();
+    let mut active_transfers: HashMap<
+        String,
+        (PathBuf, Option<String>, String, u64, std::fs::File),
+    > = HashMap::new();
 
     while let Some(frame) = read_frame_with(&mut stream, &mut cipher).await? {
         match frame {
@@ -196,7 +198,9 @@ async fn handle_connection(
                     let (sec_key, pub_key) = generate_ephemeral_keypair();
                     write_frame_with(
                         &mut stream,
-                        &Frame::KeyExchange { public_key: pub_key },
+                        &Frame::KeyExchange {
+                            public_key: pub_key,
+                        },
                         &mut cipher,
                     )
                     .await?;
@@ -262,7 +266,8 @@ async fn handle_connection(
                 pin,
             } => {
                 if security.verify_pin(&pin) {
-                    let paired = security.add_or_update_trusted(&device_id, &device_name, &fingerprint);
+                    let paired =
+                        security.add_or_update_trusted(&device_id, &device_name, &fingerprint);
                     peer_trusted = true;
                     peer_name = device_name;
                     let _ = events.send(CoreEvent::PeerPaired(paired)).await;
@@ -563,7 +568,13 @@ async fn handle_connection(
                     .await?;
                     continue;
                 }
-                if clipboard_guard.accept_remote_image(&sender_name, width, height, &png_bytes, &sha256) {
+                if clipboard_guard.accept_remote_image(
+                    &sender_name,
+                    width,
+                    height,
+                    &png_bytes,
+                    &sha256,
+                ) {
                     let _ = set_clipboard_image_png(&png_bytes);
                     let _ = events
                         .send(CoreEvent::ClipboardImageReceived {
@@ -679,9 +690,12 @@ async fn connect_secure(
     timeout_secs: Option<u64>,
 ) -> Result<(TcpStream, SessionCipher, Option<Frame>)> {
     let mut stream = if let Some(secs) = timeout_secs {
-        tokio::time::timeout(std::time::Duration::from_secs(secs), TcpStream::connect(addr))
-            .await
-            .map_err(|_| LierError::Protocol(format!("Таймаут подключения к {addr}")))??
+        tokio::time::timeout(
+            std::time::Duration::from_secs(secs),
+            TcpStream::connect(addr),
+        )
+        .await
+        .map_err(|_| LierError::Protocol(format!("Таймаут подключения к {addr}")))??
     } else {
         TcpStream::connect(addr).await?
     };
@@ -706,10 +720,7 @@ async fn connect_secure(
         read_frame_with(&mut stream, &mut cipher).await?
     };
 
-    if let Some(Frame::KeyExchange {
-        public_key: s_pub,
-    }) = kex_reply
-    {
+    if let Some(Frame::KeyExchange { public_key: s_pub }) = kex_reply {
         let shared = derive_shared_secret(c_sec, &s_pub);
         cipher = SessionCipher::from_shared_secret(&shared, &c_pub, &s_pub, StreamRole::Client);
     }
@@ -820,11 +831,8 @@ pub fn expand_paths_for_send(paths: &[PathBuf]) -> Result<Vec<BatchItem>> {
                     continue;
                 }
                 if let Ok(rel) = entry.path().strip_prefix(path) {
-                    let rel_str = format!(
-                        "{}/{}",
-                        root_name,
-                        rel.to_string_lossy().replace('\\', "/")
-                    );
+                    let rel_str =
+                        format!("{}/{}", root_name, rel.to_string_lossy().replace('\\', "/"));
                     let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                     items.push(BatchItem {
                         abs_path: entry.path().to_path_buf(),
@@ -887,7 +895,11 @@ where
             Some(Frame::QuickSendAccept { accepted: true, .. }) => {}
             Some(Frame::QuickSendAccept {
                 accepted: false, ..
-            }) => return Err(LierError::Protocol("Peer rejected transfer (check pairing/whitelist)".into())),
+            }) => {
+                return Err(LierError::Protocol(
+                    "Peer rejected transfer (check pairing/whitelist)".into(),
+                ));
+            }
             Some(Frame::Error { message }) => return Err(LierError::Protocol(message)),
             _ => return Err(LierError::Protocol("Unexpected response to offer".into())),
         }
@@ -911,10 +923,21 @@ where
             .await?;
             offset += n as u64;
             sent_bytes_all += n as u64;
-            on_progress(idx + 1, total_files, sent_bytes_all, total_bytes, &item.rel_path);
+            on_progress(
+                idx + 1,
+                total_files,
+                sent_bytes_all,
+                total_bytes,
+                &item.rel_path,
+            );
         }
 
-        write_frame_with(&mut stream, &Frame::QuickSendDone { transfer_id }, &mut cipher).await?;
+        write_frame_with(
+            &mut stream,
+            &Frame::QuickSendDone { transfer_id },
+            &mut cipher,
+        )
+        .await?;
         let _ = read_frame_with(&mut stream, &mut cipher).await?;
     }
 
@@ -960,7 +983,11 @@ where
         Some(Frame::QuickSendAccept { accepted: true, .. }) => {}
         Some(Frame::QuickSendAccept {
             accepted: false, ..
-        }) => return Err(LierError::Protocol("Peer rejected transfer (check pairing/whitelist)".into())),
+        }) => {
+            return Err(LierError::Protocol(
+                "Peer rejected transfer (check pairing/whitelist)".into(),
+            ));
+        }
         Some(Frame::Error { message }) => return Err(LierError::Protocol(message)),
         _ => return Err(LierError::Protocol("Unexpected response to offer".into())),
     }
@@ -987,7 +1014,12 @@ where
         on_progress(offset, file_size);
     }
 
-    write_frame_with(&mut stream, &Frame::QuickSendDone { transfer_id }, &mut cipher).await?;
+    write_frame_with(
+        &mut stream,
+        &Frame::QuickSendDone { transfer_id },
+        &mut cipher,
+    )
+    .await?;
     let _ = read_frame_with(&mut stream, &mut cipher).await?;
     Ok(())
 }
@@ -1067,7 +1099,9 @@ pub async fn sync_folder_from_peer(
         )
         .await?;
 
-        if let Some(Frame::SyncChunkData { data, .. }) = read_frame_with(&mut stream, &mut cipher).await? {
+        if let Some(Frame::SyncChunkData { data, .. }) =
+            read_frame_with(&mut stream, &mut cipher).await?
+        {
             let dest = safe_join(local_dir, rel_path)?;
             write_chunk(&dest, *chunk_index, &data)?;
             fetched += 1;
@@ -1148,7 +1182,9 @@ pub async fn sync_folder_by_direction(
     direction: SyncDirection,
 ) -> Result<usize> {
     match direction {
-        SyncDirection::ReceiveOnly => sync_folder_from_peer(addr, identity, folder_id, local_dir).await,
+        SyncDirection::ReceiveOnly => {
+            sync_folder_from_peer(addr, identity, folder_id, local_dir).await
+        }
         SyncDirection::SendOnly => push_folder_to_peer(addr, identity, folder_id, local_dir).await,
         SyncDirection::Bidirectional => {
             let pulled = sync_folder_from_peer(addr, identity, folder_id, local_dir).await?;
@@ -1159,11 +1195,16 @@ pub async fn sync_folder_by_direction(
 }
 
 /// Measure round-trip connectivity and retrieve remote peer name/OS via `Hello` handshake.
-pub async fn ping_peer(addr: SocketAddr, identity: &DeviceIdentity) -> Result<(String, String, u128)> {
+pub async fn ping_peer(
+    addr: SocketAddr,
+    identity: &DeviceIdentity,
+) -> Result<(String, String, u128)> {
     let started = std::time::Instant::now();
     let (_, _, hello) = connect_secure(addr, identity, Some(4)).await?;
     match hello {
-        Some(Frame::Hello { device_name, os, .. }) => {
+        Some(Frame::Hello {
+            device_name, os, ..
+        }) => {
             let ms = started.elapsed().as_millis();
             Ok((device_name, os, ms))
         }
@@ -1218,7 +1259,9 @@ pub async fn fetch_clipboard_payload_from_peer(
             png_bytes,
         }),
         Some(Frame::Error { message }) => Err(LierError::Protocol(message)),
-        _ => Err(LierError::Protocol("Неожиданный ответ на запрос буфера".into())),
+        _ => Err(LierError::Protocol(
+            "Неожиданный ответ на запрос буфера".into(),
+        )),
     }
 }
 
@@ -1317,7 +1360,10 @@ fn unique_dest_path(dir: &Path, name: &str) -> PathBuf {
 fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     let clean = Path::new(rel);
     for comp in clean.components() {
-        if matches!(comp, std::path::Component::ParentDir | std::path::Component::RootDir) {
+        if matches!(
+            comp,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        ) {
             return Err(LierError::Protocol(format!("Unsafe relative path: {rel}")));
         }
     }

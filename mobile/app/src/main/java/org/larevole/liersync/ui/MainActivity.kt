@@ -519,7 +519,7 @@ fun LierSyncMobileApp() {
                                 border = BorderStroke(1.dp, AccentTeal.copy(alpha = 0.35f))
                             ) {
                                 Text(
-                                    "v1.1",
+                                    "v1.2",
                                     color = AccentTeal,
                                     style = MaterialTheme.typography.labelSmall,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)

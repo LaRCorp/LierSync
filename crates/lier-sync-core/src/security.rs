@@ -65,10 +65,7 @@ impl SessionCipher {
         match self {
             Self::Plain => Ok(plaintext.to_vec()),
             Self::Encrypted {
-                key,
-                role,
-                tx_seq,
-                ..
+                key, role, tx_seq, ..
             } => {
                 let cipher = ChaCha20Poly1305::new_from_slice(key)
                     .map_err(|_| LierError::Protocol("Invalid session key".into()))?;
@@ -97,10 +94,7 @@ impl SessionCipher {
         match self {
             Self::Plain => Ok(ciphertext.to_vec()),
             Self::Encrypted {
-                key,
-                role,
-                rx_seq,
-                ..
+                key, role, rx_seq, ..
             } => {
                 let cipher = ChaCha20Poly1305::new_from_slice(key)
                     .map_err(|_| LierError::Protocol("Invalid session key".into()))?;
@@ -120,7 +114,9 @@ impl SessionCipher {
                             aad: SESSION_AAD,
                         },
                     )
-                    .map_err(|_| LierError::Protocol("Frame authentication/decryption failed".into()))
+                    .map_err(|_| {
+                        LierError::Protocol("Frame authentication/decryption failed".into())
+                    })
             }
         }
     }
@@ -181,7 +177,10 @@ impl SecurityManager {
     }
 
     pub fn encrypt_enabled(&self) -> bool {
-        self.inner.read().map(|g| g.encrypt_transport).unwrap_or(true)
+        self.inner
+            .read()
+            .map(|g| g.encrypt_transport)
+            .unwrap_or(true)
     }
 
     pub fn set_encrypt_transport(&self, enabled: bool) {
@@ -275,9 +274,8 @@ impl SecurityManager {
     pub fn remove_trusted(&self, device_id_or_fp: &str) -> bool {
         if let Ok(mut g) = self.inner.write() {
             let before = g.trusted_peers.len();
-            g.trusted_peers.retain(|p| {
-                p.device_id != device_id_or_fp && p.fingerprint != device_id_or_fp
-            });
+            g.trusted_peers
+                .retain(|p| p.device_id != device_id_or_fp && p.fingerprint != device_id_or_fp);
             return g.trusted_peers.len() != before;
         }
         false
@@ -346,7 +344,10 @@ fn hex_encode_component(s: &str) -> String {
 fn hex_decode_component(hex: &str) -> String {
     let bytes: Vec<u8> = (0..hex.len())
         .step_by(2)
-        .filter_map(|i| hex.get(i..i + 2).and_then(|s| u8::from_str_radix(s, 16).ok()))
+        .filter_map(|i| {
+            hex.get(i..i + 2)
+                .and_then(|s| u8::from_str_radix(s, 16).ok())
+        })
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -417,8 +418,10 @@ mod tests {
         let ss_s = derive_shared_secret(s_sec, &c_pub);
         assert_eq!(ss_c, ss_s);
 
-        let mut client = SessionCipher::from_shared_secret(&ss_c, &c_pub, &s_pub, StreamRole::Client);
-        let mut server = SessionCipher::from_shared_secret(&ss_s, &c_pub, &s_pub, StreamRole::Server);
+        let mut client =
+            SessionCipher::from_shared_secret(&ss_c, &c_pub, &s_pub, StreamRole::Client);
+        let mut server =
+            SessionCipher::from_shared_secret(&ss_s, &c_pub, &s_pub, StreamRole::Server);
 
         let ct1 = client.seal(b"hello secure liersync").unwrap();
         let pt1 = server.open(&ct1).unwrap();
@@ -448,7 +451,8 @@ mod tests {
 
     #[test]
     fn qr_png_generates_valid_header() {
-        let png = generate_qr_png("liersync://pair?addr=192.168.1.5:47789&pin=123456", 240).unwrap();
+        let png =
+            generate_qr_png("liersync://pair?addr=192.168.1.5:47789&pin=123456", 240).unwrap();
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 }

@@ -136,7 +136,8 @@ impl DiscoveryService {
                 loop {
                     match recv_socket.recv_from(&mut buf).await {
                         Ok((len, src)) => {
-                            if let Ok(ann) = serde_json::from_slice::<PeerAnnouncement>(&buf[..len]) {
+                            if let Ok(ann) = serde_json::from_slice::<PeerAnnouncement>(&buf[..len])
+                            {
                                 if ann.device_id == own_id {
                                     continue;
                                 }

@@ -67,12 +67,16 @@ impl ChannelPolicy {
 
     pub fn label(self, lang: AppLanguage) -> &'static str {
         match (self, lang) {
-            (ChannelPolicy::Auto, AppLanguage::Ru) => "Авто (Wi-Fi -> USB/Direct -> Bluetooth -> Relay)",
+            (ChannelPolicy::Auto, AppLanguage::Ru) => {
+                "Авто (Wi-Fi -> USB/Direct -> Bluetooth -> Relay)"
+            }
             (ChannelPolicy::WifiLanOnly, AppLanguage::Ru) => "Только Wi-Fi / LAN",
             (ChannelPolicy::WifiDirectUsbOnly, AppLanguage::Ru) => "Wi-Fi Direct / USB-модем",
             (ChannelPolicy::BluetoothPreferred, AppLanguage::Ru) => "Bluetooth (резервный канал)",
             (ChannelPolicy::InternetRelay, AppLanguage::Ru) => "Удалённый Relay (Интернет)",
-            (ChannelPolicy::Auto, AppLanguage::En) => "Auto (Wi-Fi -> USB/Direct -> Bluetooth -> Relay)",
+            (ChannelPolicy::Auto, AppLanguage::En) => {
+                "Auto (Wi-Fi -> USB/Direct -> Bluetooth -> Relay)"
+            }
             (ChannelPolicy::WifiLanOnly, AppLanguage::En) => "Wi-Fi / LAN only",
             (ChannelPolicy::WifiDirectUsbOnly, AppLanguage::En) => "Wi-Fi Direct / USB Tether",
             (ChannelPolicy::BluetoothPreferred, AppLanguage::En) => "Bluetooth (fallback)",
@@ -122,7 +126,9 @@ pub fn probe_channels_for_lang(
             },
             ChannelDescriptor {
                 medium: TransportMedium::InternetRelay,
-                available: relay_endpoint.map(|s| !s.trim().is_empty()).unwrap_or(false),
+                available: relay_endpoint
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false),
                 endpoint_hint: relay_endpoint
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or("Не настроен (укажите адрес relay/IP)")
@@ -151,7 +157,9 @@ pub fn probe_channels_for_lang(
             },
             ChannelDescriptor {
                 medium: TransportMedium::InternetRelay,
-                available: relay_endpoint.map(|s| !s.trim().is_empty()).unwrap_or(false),
+                available: relay_endpoint
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false),
                 endpoint_hint: relay_endpoint
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or("Not configured (enter relay host/IP)")
@@ -178,7 +186,9 @@ pub fn select_active_medium(
         ]
         .into_iter()
         .find(|&m| is_up(m)),
-        ChannelPolicy::WifiLanOnly => is_up(TransportMedium::LanWifi).then_some(TransportMedium::LanWifi),
+        ChannelPolicy::WifiLanOnly => {
+            is_up(TransportMedium::LanWifi).then_some(TransportMedium::LanWifi)
+        }
         ChannelPolicy::WifiDirectUsbOnly => {
             is_up(TransportMedium::WifiDirectUsb).then_some(TransportMedium::WifiDirectUsb)
         }

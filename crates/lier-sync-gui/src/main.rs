@@ -5,29 +5,30 @@
 mod i18n;
 
 use chrono::Local;
-use i18n::{dir_choices, folder_status_label, policy_choices, tr, DirChoice, PolicyChoice};
+use i18n::{DirChoice, PolicyChoice, dir_choices, folder_status_label, policy_choices, tr};
 use iced::theme::Palette;
 use iced::widget::{
-    button, checkbox, column, container, image as iced_image, pick_list, progress_bar, row, rule,
-    scrollable, svg, text, text_input, Space,
+    Space, button, checkbox, column, container, image as iced_image, pick_list, progress_bar, row,
+    rule, scrollable, svg, text, text_input,
 };
 use iced::{
-    event, time, window, Alignment, Background, Border, Color, Element, Fill, Size, Subscription,
-    Task, Theme,
+    Alignment, Background, Border, Color, Element, Fill, Size, Subscription, Task, Theme, event,
+    time, window,
 };
 use lier_sync_core::{
-    build_pairing_uri, compare_folder_with_peer, detect_local_ipv4s,
-    fetch_clipboard_payload_from_peer, generate_qr_png, get_clipboard_image_png,
-    get_clipboard_text, list_paired_bluetooth_devices, pair_with_peer, ping_peer,
-    probe_channels_for_lang, select_active_medium, send_bluetooth_clipboard_image,
-    send_bluetooth_clipboard_text, send_bluetooth_quick_batch, send_clipboard_image_png,
-    send_clipboard_text, send_quick_batch, set_clipboard_image_png, set_clipboard_text,
-    spawn_folder_watcher, start_bluetooth_server, start_p2p_server_secure,
-    sync_folder_by_direction, AppConfig, AppLanguage, BluetoothPeerInfo, ChannelDescriptor,
-    ChannelPolicy, ClipboardDirection, ClipboardGuard, CoreEvent, DeviceIdentity, DiscoveryService,
-    FolderChangeEvent, PeerInfo, RemoteClipboardPayload, SecurityManager, SecurityPolicy,
-    SharedFolderConfig, SharedFolderRegistry, SyncDirection, SyncPreview, TransferDirection,
-    TransferRecord, DEFAULT_P2P_PORT,
+    AppConfig, AppLanguage, BluetoothPeerInfo, ChannelDescriptor, ChannelPolicy,
+    ClipboardDirection, ClipboardGuard, CoreEvent, DEFAULT_P2P_PORT, DeviceIdentity,
+    DiscoveryService, EcosystemAppStatus, EcosystemBridgeContext, EcosystemBridgeEvent,
+    FolderChangeEvent, LIERSYNC_BRIDGE_PORT, PeerInfo, RemoteClipboardPayload, SecurityManager,
+    SecurityPolicy, SharedFolderConfig, SharedFolderRegistry, SyncDirection, SyncPreview,
+    TransferDirection, TransferRecord, build_pairing_uri, compare_folder_with_peer,
+    detect_local_ipv4s, fetch_clipboard_payload_from_peer, generate_qr_png,
+    get_clipboard_image_png, get_clipboard_text, list_paired_bluetooth_devices, pair_with_peer,
+    ping_peer, probe_channels_for_lang, probe_ecosystem_apps, select_active_medium,
+    send_bluetooth_clipboard_image, send_bluetooth_clipboard_text, send_bluetooth_quick_batch,
+    send_clipboard_image_png, send_clipboard_text, send_quick_batch, set_clipboard_image_png,
+    set_clipboard_text, spawn_folder_watcher, start_bluetooth_server, start_ecosystem_bridge,
+    start_p2p_server_secure, sync_folder_by_direction,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -39,15 +40,51 @@ use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 // LierTags-inspired Dark Crimson + Teal palette
-const BG_BASE: Color = Color::from_rgb(0x12 as f32 / 255.0, 0x13 as f32 / 255.0, 0x16 as f32 / 255.0);
-const BG_SURFACE: Color = Color::from_rgb(0x1A as f32 / 255.0, 0x1B as f32 / 255.0, 0x20 as f32 / 255.0);
-const BG_ELEVATED: Color = Color::from_rgb(0x24 as f32 / 255.0, 0x26 as f32 / 255.0, 0x2E as f32 / 255.0);
-const BORDER_COLOR: Color = Color::from_rgb(0x33 as f32 / 255.0, 0x36 as f32 / 255.0, 0x42 as f32 / 255.0);
-const ACCENT_TEAL: Color = Color::from_rgb(0x39 as f32 / 255.0, 0xC5 as f32 / 255.0, 0xBB as f32 / 255.0);
-const ACCENT_RED: Color = Color::from_rgb(0x8B as f32 / 255.0, 0x00 as f32 / 255.0, 0x00 as f32 / 255.0);
-const ACCENT_RED_HOVER: Color = Color::from_rgb(0xA8 as f32 / 255.0, 0x13 as f32 / 255.0, 0x13 as f32 / 255.0);
-const TEXT_MAIN: Color = Color::from_rgb(0xE0 as f32 / 255.0, 0xE2 as f32 / 255.0, 0xEC as f32 / 255.0);
-const TEXT_MUTED: Color = Color::from_rgb(0x9E as f32 / 255.0, 0xA2 as f32 / 255.0, 0xB0 as f32 / 255.0);
+const BG_BASE: Color = Color::from_rgb(
+    0x12 as f32 / 255.0,
+    0x13 as f32 / 255.0,
+    0x16 as f32 / 255.0,
+);
+const BG_SURFACE: Color = Color::from_rgb(
+    0x1A as f32 / 255.0,
+    0x1B as f32 / 255.0,
+    0x20 as f32 / 255.0,
+);
+const BG_ELEVATED: Color = Color::from_rgb(
+    0x24 as f32 / 255.0,
+    0x26 as f32 / 255.0,
+    0x2E as f32 / 255.0,
+);
+const BORDER_COLOR: Color = Color::from_rgb(
+    0x33 as f32 / 255.0,
+    0x36 as f32 / 255.0,
+    0x42 as f32 / 255.0,
+);
+const ACCENT_TEAL: Color = Color::from_rgb(
+    0x39 as f32 / 255.0,
+    0xC5 as f32 / 255.0,
+    0xBB as f32 / 255.0,
+);
+const ACCENT_RED: Color = Color::from_rgb(
+    0x8B as f32 / 255.0,
+    0x00 as f32 / 255.0,
+    0x00 as f32 / 255.0,
+);
+const ACCENT_RED_HOVER: Color = Color::from_rgb(
+    0xA8 as f32 / 255.0,
+    0x13 as f32 / 255.0,
+    0x13 as f32 / 255.0,
+);
+const TEXT_MAIN: Color = Color::from_rgb(
+    0xE0 as f32 / 255.0,
+    0xE2 as f32 / 255.0,
+    0xEC as f32 / 255.0,
+);
+const TEXT_MUTED: Color = Color::from_rgb(
+    0x9E as f32 / 255.0,
+    0xA2 as f32 / 255.0,
+    0xB0 as f32 / 255.0,
+);
 
 const LOGO_PNG: &[u8] = include_bytes!("../assets/logo_128.png");
 const ICON_SEND: &[u8] = include_bytes!("../assets/icons/send.svg");
@@ -103,10 +140,17 @@ struct TrayState {
 
 impl TrayState {
     fn apply_language(&self, lang: AppLanguage) {
-        self.item_open.set_text(tr(lang, "Открыть LierSync", "Open LierSync"));
-        self.item_push_clip.set_text(tr(lang, "Отправить буфер", "Send clipboard"));
-        self.item_pull_clip.set_text(tr(lang, "Получить буфер", "Pull clipboard"));
-        self.item_open_dl.set_text(tr(lang, "Открыть Загрузки\\LierSync", "Open Downloads\\LierSync"));
+        self.item_open
+            .set_text(tr(lang, "Открыть LierSync", "Open LierSync"));
+        self.item_push_clip
+            .set_text(tr(lang, "Отправить буфер", "Send clipboard"));
+        self.item_pull_clip
+            .set_text(tr(lang, "Получить буфер", "Pull clipboard"));
+        self.item_open_dl.set_text(tr(
+            lang,
+            "Открыть Загрузки\\LierSync",
+            "Open Downloads\\LierSync",
+        ));
         self.item_exit.set_text(tr(lang, "Выход", "Exit"));
         let _ = self.tray.set_tooltip(Some(tr(
             lang,
@@ -128,6 +172,7 @@ enum UiUpdate {
     FolderPreview(String, SyncPreview),
     PingResult(String),
     PairFinished(String),
+    EcosystemApps(Vec<EcosystemAppStatus>),
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +237,7 @@ enum Message {
     SendClipboardBluetooth,
     SendQueueBluetooth,
     InstallSendToShortcut,
+    RefreshEcosystem,
 }
 
 struct LierSyncApp {
@@ -208,6 +254,8 @@ struct LierSyncApp {
     bt_devices: Vec<BluetoothPeerInfo>,
     selected_bt_mac: String,
     p2p_port: u16,
+    bridge_port: u16,
+    ecosystem_apps: Vec<EcosystemAppStatus>,
     local_addr_label: String,
     receive_dir: PathBuf,
     tab: ActiveTab,
@@ -323,7 +371,10 @@ impl LierSyncApp {
             core_tx.clone(),
         );
         let bt_devices = list_paired_bluetooth_devices();
-        let selected_bt_mac = bt_devices.first().map(|d| d.mac.clone()).unwrap_or_default();
+        let selected_bt_mac = bt_devices
+            .first()
+            .map(|d| d.mac.clone())
+            .unwrap_or_default();
 
         let ui_tx_peers = ui_tx.clone();
         let disc_poll = discovery.clone();
@@ -337,6 +388,50 @@ impl LierSyncApp {
 
         let auto_clipboard_flag = Arc::new(AtomicBool::new(saved_cfg.auto_clipboard));
         let clipboard_targets: Arc<Mutex<Vec<SocketAddr>>> = Arc::new(Mutex::new(Vec::new()));
+        let (bridge_tx, mut bridge_rx) = mpsc::channel::<EcosystemBridgeEvent>(32);
+        let bridge_port = rt.block_on(async {
+            let ctx = EcosystemBridgeContext {
+                identity: identity.clone(),
+                p2p_port: bound_port,
+                targets: Arc::clone(&clipboard_targets),
+                discovery: discovery.clone(),
+                clipboard_guard: clipboard_guard.clone(),
+                events: bridge_tx,
+            };
+            start_ecosystem_bridge(LIERSYNC_BRIDGE_PORT, ctx)
+                .await
+                .map(|a| a.port())
+                .unwrap_or(0)
+        });
+        {
+            let ui_tx_bridge = ui_tx.clone();
+            rt.spawn(async move {
+                while let Some(ev) = bridge_rx.recv().await {
+                    match ev {
+                        EcosystemBridgeEvent::Log(msg) => {
+                            let _ = ui_tx_bridge.send(UiUpdate::Log(msg)).await;
+                        }
+                        EcosystemBridgeEvent::IncomingBridgeFiles {
+                            source,
+                            target,
+                            count,
+                            bytes,
+                        } => {
+                            let _ = ui_tx_bridge
+                                .send(UiUpdate::Log(format!(
+                                    "[{source}] -> {target}: {count} files ({bytes} B)"
+                                )))
+                                .await;
+                        }
+                    }
+                }
+            });
+            let ui_tx_eco = ui_tx.clone();
+            rt.spawn(async move {
+                let apps = probe_ecosystem_apps(bridge_port).await;
+                let _ = ui_tx_eco.send(UiUpdate::EcosystemApps(apps)).await;
+            });
+        }
         {
             let flag = Arc::clone(&auto_clipboard_flag);
             let targets = Arc::clone(&clipboard_targets);
@@ -359,7 +454,9 @@ impl LierSyncApp {
                                 guard.record_sent(&addr.to_string(), &text, &hash);
                                 if let Err(e) = send_clipboard_text(addr, &id, &text).await {
                                     let _ = ui_tx_cb
-                                        .send(UiUpdate::Log(format!("Ошибка автобуфера ({addr}): {e}")))
+                                        .send(UiUpdate::Log(format!(
+                                            "Ошибка автобуфера ({addr}): {e}"
+                                        )))
                                         .await;
                                 }
                             }
@@ -368,9 +465,13 @@ impl LierSyncApp {
                         if let Some(hash) = guard.should_emit_local_image(&png) {
                             for addr in addrs {
                                 guard.record_sent_image(&addr.to_string(), w, h, &png, &hash);
-                                if let Err(e) = send_clipboard_image_png(addr, &id, w, h, png.clone()).await {
+                                if let Err(e) =
+                                    send_clipboard_image_png(addr, &id, w, h, png.clone()).await
+                                {
                                     let _ = ui_tx_cb
-                                        .send(UiUpdate::Log(format!("Ошибка автобуфера ({addr}): {e}")))
+                                        .send(UiUpdate::Log(format!(
+                                            "Ошибка автобуфера ({addr}): {e}"
+                                        )))
                                         .await;
                                 }
                             }
@@ -431,6 +532,8 @@ impl LierSyncApp {
             bt_devices,
             selected_bt_mac,
             p2p_port: bound_port,
+            bridge_port,
+            ecosystem_apps: Vec::new(),
             local_addr_label: local_addr_label.clone(),
             receive_dir,
             tab: ActiveTab::QuickSend,
@@ -462,7 +565,11 @@ impl LierSyncApp {
             logs: vec![format!(
                 "[{}] {}: {local_addr_label}",
                 Local::now().format("%H:%M:%S"),
-                tr(lang, "LierSync готов. Мой адрес", "LierSync ready. My address")
+                tr(
+                    lang,
+                    "LierSync готов. Мой адрес",
+                    "LierSync ready. My address"
+                )
             )],
             ui_rx: Arc::new(Mutex::new(ui_rx)),
             ui_tx,
@@ -697,9 +804,7 @@ impl LierSyncApp {
                     ));
                 }
                 CoreEvent::ClipboardReceived {
-                    from_peer,
-                    preview,
-                    ..
+                    from_peer, preview, ..
                 } => {
                     self.push_log(format!(
                         "{} {from_peer}: {preview}",
@@ -714,7 +819,11 @@ impl LierSyncApp {
                 } => {
                     self.push_log(format!(
                         "{} {from_peer}: [{} {width}x{height}]",
-                        tr(self.language, "Картинка в буфере от", "Clipboard image from"),
+                        tr(
+                            self.language,
+                            "Картинка в буфере от",
+                            "Clipboard image from"
+                        ),
                         tr(self.language, "Изображение", "Image")
                     ));
                 }
@@ -775,16 +884,22 @@ impl LierSyncApp {
                 }
                 UiUpdate::FolderChanged(ev) => {
                     let summary = ev.format_alert(self.language);
-                    if let Some(f) = self.shared_folders.iter_mut().find(|f| f.id == ev.folder_id) {
-                        f.status = format!(
-                            "{}: {summary}",
-                            tr(self.language, "Изменено", "Changed")
-                        );
+                    if let Some(f) = self
+                        .shared_folders
+                        .iter_mut()
+                        .find(|f| f.id == ev.folder_id)
+                    {
+                        f.status =
+                            format!("{}: {summary}", tr(self.language, "Изменено", "Changed"));
                     }
                     self.push_log(format!(
                         "[{}] {}: {summary}",
                         ev.folder_id,
-                        tr(self.language, "Обнаружены изменения", "Folder changes detected")
+                        tr(
+                            self.language,
+                            "Обнаружены изменения",
+                            "Folder changes detected"
+                        )
                     ));
                 }
                 UiUpdate::FolderPreview(id, preview) => {
@@ -800,6 +915,9 @@ impl LierSyncApp {
                     self.pair_status = msg.clone();
                     self.push_log(msg);
                     self.save_config();
+                }
+                UiUpdate::EcosystemApps(list) => {
+                    self.ecosystem_apps = list;
                 }
             }
         }
@@ -872,6 +990,14 @@ impl LierSyncApp {
             Message::ExitApp => iced::exit(),
             Message::SelectTab(tab) => {
                 self.tab = tab;
+                if matches!(tab, ActiveTab::About) {
+                    let ui_tx = self.ui_tx.clone();
+                    let bridge_port = self.bridge_port;
+                    self.rt.spawn(async move {
+                        let apps = probe_ecosystem_apps(bridge_port).await;
+                        let _ = ui_tx.send(UiUpdate::EcosystemApps(apps)).await;
+                    });
+                }
                 Task::none()
             }
             Message::SelectPeer(idx) => {
@@ -892,7 +1018,9 @@ impl LierSyncApp {
                 Task::none()
             }
             Message::CopyMyAddress => {
-                let _ = self.clipboard_guard.should_emit_local(&self.local_addr_label);
+                let _ = self
+                    .clipboard_guard
+                    .should_emit_local(&self.local_addr_label);
                 match set_clipboard_text(&self.local_addr_label) {
                     Ok(()) => self.push_log(format!(
                         "{}: {}",
@@ -919,15 +1047,15 @@ impl LierSyncApp {
                                 tr(l, "Связь OK", "Link OK"),
                                 tr(l, "мс", "ms")
                             ),
-                            Err(e) => format!(
-                                "{} {addr}: {e}",
-                                tr(l, "Нет связи с", "Unreachable")
-                            ),
+                            Err(e) => {
+                                format!("{} {addr}: {e}", tr(l, "Нет связи с", "Unreachable"))
+                            }
                         };
                         let _ = ui_tx.send(UiUpdate::PingResult(msg)).await;
                     });
                 } else {
-                    self.ping_status = tr(l, "Введите корректный ip:port", "Enter valid ip:port").into();
+                    self.ping_status =
+                        tr(l, "Введите корректный ip:port", "Enter valid ip:port").into();
                 }
                 Task::none()
             }
@@ -963,7 +1091,11 @@ impl LierSyncApp {
                 if added > 0 {
                     self.push_log(format!(
                         "{}: {added}",
-                        tr(self.language, "В очередь добавлено объектов", "Queued items")
+                        tr(
+                            self.language,
+                            "В очередь добавлено объектов",
+                            "Queued items"
+                        )
                     ));
                 }
                 Task::none()
@@ -1123,7 +1255,11 @@ impl LierSyncApp {
                     self.save_config();
                     self.push_log(format!(
                         "{} '{}'",
-                        tr(self.language, "Удалена общая папка", "Removed shared folder"),
+                        tr(
+                            self.language,
+                            "Удалена общая папка",
+                            "Removed shared folder"
+                        ),
                         removed.id
                     ));
                 }
@@ -1146,7 +1282,10 @@ impl LierSyncApp {
                                     let _ = ui_tx
                                         .send(UiUpdate::FolderStatus(
                                             fid,
-                                            format!("{}: {e}", tr(l, "Ошибка сравнения", "Compare error")),
+                                            format!(
+                                                "{}: {e}",
+                                                tr(l, "Ошибка сравнения", "Compare error")
+                                            ),
                                         ))
                                         .await;
                                 }
@@ -1339,7 +1478,11 @@ impl LierSyncApp {
                                     let _ = ui_tx
                                         .send(UiUpdate::Log(format!(
                                             "{} {sender_name}: [{width}x{height}]",
-                                            tr(l, "Получена картинка в буфер от", "Pulled clipboard image from")
+                                            tr(
+                                                l,
+                                                "Получена картинка в буфер от",
+                                                "Pulled clipboard image from"
+                                            )
                                         )))
                                         .await;
                                 }
@@ -1368,7 +1511,11 @@ impl LierSyncApp {
                 self.save_config();
                 self.push_log(format!(
                     "{}: {}",
-                    tr(self.language, "Выбран режим каналов", "Channel policy selected"),
+                    tr(
+                        self.language,
+                        "Выбран режим каналов",
+                        "Channel policy selected"
+                    ),
                     policy.label(self.language)
                 ));
                 Task::none()
@@ -1385,17 +1532,11 @@ impl LierSyncApp {
             }
             Message::SelectLanguage(lang) => {
                 self.language = lang;
-                self.channels = probe_channels_for_lang(
-                    self.p2p_port,
-                    Some(&self.relay_endpoint),
-                    lang,
-                );
+                self.channels =
+                    probe_channels_for_lang(self.p2p_port, Some(&self.relay_endpoint), lang);
                 for f in &mut self.shared_folders {
-                    f.status = folder_status_label(
-                        f.auto_sync.load(Ordering::Relaxed),
-                        f.direction,
-                        lang,
-                    );
+                    f.status =
+                        folder_status_label(f.auto_sync.load(Ordering::Relaxed), f.direction, lang);
                 }
                 if let Some(tray) = &self.tray {
                     tray.apply_language(lang);
@@ -1475,7 +1616,8 @@ impl LierSyncApp {
                 if let Some(addr) = self.target_addr() {
                     let pin = self.pair_pin_input.trim().to_string();
                     if pin.is_empty() {
-                        self.pair_status = tr(l, "Введите PIN другого устройства", "Enter peer PIN").into();
+                        self.pair_status =
+                            tr(l, "Введите PIN другого устройства", "Enter peer PIN").into();
                         return Task::none();
                     }
                     self.pair_status = tr(l, "Сопряжение...", "Pairing...").into();
@@ -1497,7 +1639,9 @@ impl LierSyncApp {
                                     peer.fingerprint
                                 )
                             }
-                            Err(e) => format!("{}: {e}", tr(l, "Ошибка сопряжения", "Pairing error")),
+                            Err(e) => {
+                                format!("{}: {e}", tr(l, "Ошибка сопряжения", "Pairing error"))
+                            }
                         };
                         let _ = ui_tx.send(UiUpdate::PairFinished(msg)).await;
                     });
@@ -1538,7 +1682,11 @@ impl LierSyncApp {
             Message::SendClipboardBluetooth => {
                 let l = self.language;
                 if self.selected_bt_mac.is_empty() {
-                    self.push_log(tr(l, "Выберите Bluetooth-устройство", "Select a Bluetooth device"));
+                    self.push_log(tr(
+                        l,
+                        "Выберите Bluetooth-устройство",
+                        "Select a Bluetooth device",
+                    ));
                     return Task::none();
                 }
                 let mac = self.selected_bt_mac.clone();
@@ -1550,8 +1698,13 @@ impl LierSyncApp {
                     guard.record_sent(&format!("BT {mac}"), &text, &hash);
                     self.rt.spawn(async move {
                         let msg = match send_bluetooth_clipboard_text(mac, id, text).await {
-                            Ok(()) => format!("{}: BT", tr(l, "Буфер отправлен через", "Clipboard sent via")),
-                            Err(e) => format!("{}: {e}", tr(l, "Ошибка Bluetooth", "Bluetooth error")),
+                            Ok(()) => format!(
+                                "{}: BT",
+                                tr(l, "Буфер отправлен через", "Clipboard sent via")
+                            ),
+                            Err(e) => {
+                                format!("{}: {e}", tr(l, "Ошибка Bluetooth", "Bluetooth error"))
+                            }
                         };
                         let _ = ui_tx.send(UiUpdate::Log(msg)).await;
                     });
@@ -1561,8 +1714,13 @@ impl LierSyncApp {
                     guard.record_sent_image(&format!("BT {mac}"), w, h, &png, &hash);
                     self.rt.spawn(async move {
                         let msg = match send_bluetooth_clipboard_image(mac, id, w, h, png).await {
-                            Ok(()) => format!("{}: BT ({w}x{h})", tr(l, "Картинка отправлена через", "Image sent via")),
-                            Err(e) => format!("{}: {e}", tr(l, "Ошибка Bluetooth", "Bluetooth error")),
+                            Ok(()) => format!(
+                                "{}: BT ({w}x{h})",
+                                tr(l, "Картинка отправлена через", "Image sent via")
+                            ),
+                            Err(e) => {
+                                format!("{}: {e}", tr(l, "Ошибка Bluetooth", "Bluetooth error"))
+                            }
                         };
                         let _ = ui_tx.send(UiUpdate::Log(msg)).await;
                     });
@@ -1585,10 +1743,21 @@ impl LierSyncApp {
                 let id = self.identity.clone();
                 let paths = self.send_queue.clone();
                 let ui_tx = self.ui_tx.clone();
-                self.push_log(tr(l, "Отправка файлов по Bluetooth...", "Sending files via Bluetooth..."));
+                self.push_log(tr(
+                    l,
+                    "Отправка файлов по Bluetooth...",
+                    "Sending files via Bluetooth...",
+                ));
                 self.rt.spawn(async move {
                     let msg = match send_bluetooth_quick_batch(mac, id, paths).await {
-                        Ok(n) => format!("{}: {n}", tr(l, "Отправлено файлов по Bluetooth", "Sent files via Bluetooth")),
+                        Ok(n) => format!(
+                            "{}: {n}",
+                            tr(
+                                l,
+                                "Отправлено файлов по Bluetooth",
+                                "Sent files via Bluetooth"
+                            )
+                        ),
                         Err(e) => format!("{}: {e}", tr(l, "Ошибка Bluetooth", "Bluetooth error")),
                     };
                     let _ = ui_tx.send(UiUpdate::Log(msg)).await;
@@ -1614,6 +1783,15 @@ impl LierSyncApp {
                 }
                 Task::none()
             }
+            Message::RefreshEcosystem => {
+                let ui_tx = self.ui_tx.clone();
+                let bridge_port = self.bridge_port;
+                self.rt.spawn(async move {
+                    let apps = probe_ecosystem_apps(bridge_port).await;
+                    let _ = ui_tx.send(UiUpdate::EcosystemApps(apps)).await;
+                });
+                Task::none()
+            }
         }
     }
 
@@ -1623,11 +1801,9 @@ impl LierSyncApp {
             .map(|m| m.to_string())
             .unwrap_or_else(|| tr(l, "Нет канала", "No channel").to_string());
 
-        let logo_widget = iced_image(self.logo_handle.clone())
-            .width(28)
-            .height(28);
+        let logo_widget = iced_image(self.logo_handle.clone()).width(28).height(28);
 
-        let version_badge = container(text("v1.1").size(11).color(ACCENT_TEAL))
+        let version_badge = container(text("v1.2").size(11).color(ACCENT_TEAL))
             .padding([3, 8])
             .style(|_| container::Style {
                 background: Some(Background::Color(BG_ELEVATED)),
@@ -1650,9 +1826,13 @@ impl LierSyncApp {
                 Space::new().width(Fill),
                 row![
                     column![
-                        text(format!("{}: {}", tr(l, "Мой адрес", "My address"), self.local_addr_label))
-                            .size(13)
-                            .color(ACCENT_TEAL),
+                        text(format!(
+                            "{}: {}",
+                            tr(l, "Мой адрес", "My address"),
+                            self.local_addr_label
+                        ))
+                        .size(13)
+                        .color(ACCENT_TEAL),
                         text(format!(
                             "{} · {}: {} · {active_medium}",
                             self.identity.device_name,
@@ -1665,9 +1845,12 @@ impl LierSyncApp {
                     .align_x(Alignment::End)
                     .spacing(2),
                     button(
-                        row![icon(ICON_COPY, 14.0), text(tr(l, "Копировать", "Copy")).size(12)]
-                            .spacing(5)
-                            .align_y(Alignment::Center)
+                        row![
+                            icon(ICON_COPY, 14.0),
+                            text(tr(l, "Копировать", "Copy")).size(12)
+                        ]
+                        .spacing(5)
+                        .align_y(Alignment::Center)
                     )
                     .on_press(Message::CopyMyAddress)
                     .style(secondary_btn_style),
@@ -1684,13 +1867,43 @@ impl LierSyncApp {
         .style(surface_card_style);
 
         let tabs = row![
-            tab_button(tr(l, "Отправка", "Quick Send"), ICON_SEND, ActiveTab::QuickSend, self.tab),
-            tab_button(tr(l, "Синхронизация", "Sync"), ICON_SYNC, ActiveTab::SyncFolders, self.tab),
-            tab_button(tr(l, "Буфер обмена", "Clipboard"), ICON_CLIPBOARD, ActiveTab::Clipboard, self.tab),
-            tab_button(tr(l, "Каналы связи", "Channels"), ICON_CHANNELS, ActiveTab::Channels, self.tab),
+            tab_button(
+                tr(l, "Отправка", "Quick Send"),
+                ICON_SEND,
+                ActiveTab::QuickSend,
+                self.tab
+            ),
+            tab_button(
+                tr(l, "Синхронизация", "Sync"),
+                ICON_SYNC,
+                ActiveTab::SyncFolders,
+                self.tab
+            ),
+            tab_button(
+                tr(l, "Буфер обмена", "Clipboard"),
+                ICON_CLIPBOARD,
+                ActiveTab::Clipboard,
+                self.tab
+            ),
+            tab_button(
+                tr(l, "Каналы связи", "Channels"),
+                ICON_CHANNELS,
+                ActiveTab::Channels,
+                self.tab
+            ),
             Space::new().width(Fill),
-            tab_button(tr(l, "Настройки", "Settings"), ICON_SETTINGS, ActiveTab::Settings, self.tab),
-            tab_button(tr(l, "О программе", "About"), ICON_INFO, ActiveTab::About, self.tab),
+            tab_button(
+                tr(l, "Настройки", "Settings"),
+                ICON_SETTINGS,
+                ActiveTab::Settings,
+                self.tab
+            ),
+            tab_button(
+                tr(l, "О программе", "About"),
+                ICON_INFO,
+                ActiveTab::About,
+                self.tab
+            ),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -1706,13 +1919,20 @@ impl LierSyncApp {
 
         let footer = container(
             row![
-                text(format!("{}: {}", tr(l, "Сохранение", "Save folder"), self.receive_dir.display()))
-                    .size(11)
-                    .color(TEXT_MUTED),
+                text(format!(
+                    "{}: {}",
+                    tr(l, "Сохранение", "Save folder"),
+                    self.receive_dir.display()
+                ))
+                .size(11)
+                .color(TEXT_MUTED),
                 button(
-                    row![icon(ICON_FOLDER, 13.0), text(tr(l, "Открыть папку", "Open folder")).size(11)]
-                        .spacing(5)
-                        .align_y(Alignment::Center)
+                    row![
+                        icon(ICON_FOLDER, 13.0),
+                        text(tr(l, "Открыть папку", "Open folder")).size(11)
+                    ]
+                    .spacing(5)
+                    .align_y(Alignment::Center)
                 )
                 .on_press(Message::OpenDownloadsFolder)
                 .style(secondary_btn_style),
@@ -1778,14 +1998,19 @@ impl LierSyncApp {
 
         peers_col = peers_col.push(
             row![
-                text(tr(l, "IP:порт:", "IP:port:")).size(13).color(TEXT_MUTED),
+                text(tr(l, "IP:порт:", "IP:port:"))
+                    .size(13)
+                    .color(TEXT_MUTED),
                 text_input("192.168.43.1:47789", &self.manual_addr)
                     .on_input(Message::ManualAddrChanged)
                     .width(210),
                 button(
-                    row![icon(ICON_SEARCH, 14.0), text(tr(l, "Проверить", "Ping")).size(12)]
-                        .spacing(5)
-                        .align_y(Alignment::Center)
+                    row![
+                        icon(ICON_SEARCH, 14.0),
+                        text(tr(l, "Проверить", "Ping")).size(12)
+                    ]
+                    .spacing(5)
+                    .align_y(Alignment::Center)
                 )
                 .on_press(Message::PingTarget)
                 .style(secondary_btn_style),
@@ -1795,35 +2020,51 @@ impl LierSyncApp {
             .align_y(Alignment::Center),
         );
 
-        let peers_card = container(peers_col).padding(12).width(Fill).style(surface_card_style);
+        let peers_card = container(peers_col)
+            .padding(12)
+            .width(Fill)
+            .style(surface_card_style);
 
         let actions = row![
             text(tr(l, "2. Файлы и папки", "2. Files & Folders")).size(15),
             Space::new().width(Fill),
             button(
-                row![icon(ICON_FILE, 14.0), text(tr(l, "Выбрать файлы", "Pick files")).size(12)]
-                    .spacing(5)
-                    .align_y(Alignment::Center)
+                row![
+                    icon(ICON_FILE, 14.0),
+                    text(tr(l, "Выбрать файлы", "Pick files")).size(12)
+                ]
+                .spacing(5)
+                .align_y(Alignment::Center)
             )
             .on_press(Message::PickFiles)
             .style(secondary_btn_style),
             button(
-                row![icon(ICON_FOLDER, 14.0), text(tr(l, "Добавить папку", "Add folder")).size(12)]
-                    .spacing(5)
-                    .align_y(Alignment::Center)
+                row![
+                    icon(ICON_FOLDER, 14.0),
+                    text(tr(l, "Добавить папку", "Add folder")).size(12)
+                ]
+                .spacing(5)
+                .align_y(Alignment::Center)
             )
             .on_press(Message::PickFolderForSend)
             .style(secondary_btn_style),
             button(
-                row![icon(ICON_TRASH, 14.0), text(tr(l, "Очистить", "Clear")).size(12)]
-                    .spacing(5)
-                    .align_y(Alignment::Center)
+                row![
+                    icon(ICON_TRASH, 14.0),
+                    text(tr(l, "Очистить", "Clear")).size(12)
+                ]
+                .spacing(5)
+                .align_y(Alignment::Center)
             )
             .on_press(Message::ClearQueue)
             .style(crimson_btn_style),
-            text(format!("{}: {}", tr(l, "В очереди", "Queued"), self.send_queue.len()))
-                .size(12)
-                .color(TEXT_MUTED),
+            text(format!(
+                "{}: {}",
+                tr(l, "В очереди", "Queued"),
+                self.send_queue.len()
+            ))
+            .size(12)
+            .color(TEXT_MUTED),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -1841,7 +2082,11 @@ impl LierSyncApp {
             );
         } else {
             for (i, path) in self.send_queue.iter().enumerate() {
-                let kind_icon = if path.is_dir() { ICON_FOLDER } else { ICON_FILE };
+                let kind_icon = if path.is_dir() {
+                    ICON_FOLDER
+                } else {
+                    ICON_FILE
+                };
                 queue_col = queue_col.push(
                     row![
                         icon(kind_icon, 14.0),
@@ -1857,9 +2102,12 @@ impl LierSyncApp {
         }
 
         let send_btn = button(
-            row![icon(ICON_SEND, 15.0), text(tr(l, "Отправить всё", "Send all")).size(13)]
-                .spacing(6)
-                .align_y(Alignment::Center),
+            row![
+                icon(ICON_SEND, 15.0),
+                text(tr(l, "Отправить всё", "Send all")).size(13)
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
         )
         .on_press_maybe(
             (!self.send_queue.is_empty() && self.target_addr().is_some())
@@ -1937,9 +2185,14 @@ impl LierSyncApp {
             .width(Fill)
             .style(surface_card_style);
 
-        column![peers_card, transfer_card, received_card, self.view_logs_card(85.0)]
-            .spacing(8)
-            .into()
+        column![
+            peers_card,
+            transfer_card,
+            received_card,
+            self.view_logs_card(85.0)
+        ]
+        .spacing(8)
+        .into()
     }
 
     fn view_sync_folders(&self) -> Element<'_, Message> {
@@ -1962,9 +2215,12 @@ impl LierSyncApp {
                 )
                 .width(195),
                 button(
-                    row![icon(ICON_PLUS, 14.0), text(tr(l, "Выбрать папку", "Choose folder")).size(12)]
-                        .spacing(5)
-                        .align_y(Alignment::Center)
+                    row![
+                        icon(ICON_PLUS, 14.0),
+                        text(tr(l, "Выбрать папку", "Choose folder")).size(12)
+                    ]
+                    .spacing(5)
+                    .align_y(Alignment::Center)
                 )
                 .on_press(Message::PickSyncFolder)
                 .style(teal_btn_style),
@@ -1995,53 +2251,62 @@ impl LierSyncApp {
         } else {
             for (i, folder) in self.shared_folders.iter().enumerate() {
                 let auto_on = folder.auto_sync.load(Ordering::Relaxed);
-                let mut card_col = column![row![
-                    icon(ICON_FOLDER, 18.0),
-                    column![
-                        text(&folder.id).size(15),
-                        text(folder.path.display().to_string())
-                            .size(12)
-                            .color(TEXT_MUTED),
-                        text(&folder.status).size(12).color(ACCENT_TEAL),
+                let mut card_col = column![
+                    row![
+                        icon(ICON_FOLDER, 18.0),
+                        column![
+                            text(&folder.id).size(15),
+                            text(folder.path.display().to_string())
+                                .size(12)
+                                .color(TEXT_MUTED),
+                            text(&folder.status).size(12).color(ACCENT_TEAL),
+                        ]
+                        .spacing(2)
+                        .width(Fill),
+                        pick_list(dir_opts, Some(DirChoice(folder.direction, l)), move |c| {
+                            Message::ChangeFolderDirection(i, c.0)
+                        },)
+                        .width(175),
+                        checkbox(auto_on)
+                            .label(tr(l, "Авто", "Auto"))
+                            .on_toggle(move |v| Message::ToggleFolderAuto(i, v)),
+                        button(
+                            row![
+                                icon(ICON_FOLDER, 14.0),
+                                text(tr(l, "Открыть", "Open")).size(12)
+                            ]
+                            .spacing(4)
+                            .align_y(Alignment::Center)
+                        )
+                        .on_press(Message::OpenPath(folder.path.clone()))
+                        .style(secondary_btn_style),
+                        button(
+                            row![
+                                icon(ICON_SEARCH, 14.0),
+                                text(tr(l, "Сравнить", "Compare")).size(12)
+                            ]
+                            .spacing(4)
+                            .align_y(Alignment::Center)
+                        )
+                        .on_press(Message::CompareFolder(i))
+                        .style(secondary_btn_style),
+                        button(
+                            row![
+                                icon(ICON_SYNC, 14.0),
+                                text(tr(l, "Синхр.", "Sync")).size(12)
+                            ]
+                            .spacing(4)
+                            .align_y(Alignment::Center)
+                        )
+                        .on_press(Message::SyncFolder(i))
+                        .style(teal_btn_style),
+                        button(icon(ICON_TRASH, 14.0))
+                            .on_press(Message::RemoveFolder(i))
+                            .style(crimson_btn_style),
                     ]
-                    .spacing(2)
-                    .width(Fill),
-                    pick_list(
-                        dir_opts,
-                        Some(DirChoice(folder.direction, l)),
-                        move |c| Message::ChangeFolderDirection(i, c.0),
-                    )
-                    .width(175),
-                    checkbox(auto_on)
-                        .label(tr(l, "Авто", "Auto"))
-                        .on_toggle(move |v| Message::ToggleFolderAuto(i, v)),
-                    button(
-                        row![icon(ICON_FOLDER, 14.0), text(tr(l, "Открыть", "Open")).size(12)]
-                            .spacing(4)
-                            .align_y(Alignment::Center)
-                    )
-                    .on_press(Message::OpenPath(folder.path.clone()))
-                    .style(secondary_btn_style),
-                    button(
-                        row![icon(ICON_SEARCH, 14.0), text(tr(l, "Сравнить", "Compare")).size(12)]
-                            .spacing(4)
-                            .align_y(Alignment::Center)
-                    )
-                    .on_press(Message::CompareFolder(i))
-                    .style(secondary_btn_style),
-                    button(
-                        row![icon(ICON_SYNC, 14.0), text(tr(l, "Синхр.", "Sync")).size(12)]
-                            .spacing(4)
-                            .align_y(Alignment::Center)
-                    )
-                    .on_press(Message::SyncFolder(i))
-                    .style(teal_btn_style),
-                    button(icon(ICON_TRASH, 14.0))
-                        .on_press(Message::RemoveFolder(i))
-                        .style(crimson_btn_style),
+                    .spacing(6)
+                    .align_y(Alignment::Center)
                 ]
-                .spacing(6)
-                .align_y(Alignment::Center)]
                 .spacing(6);
 
                 if let Some(prev) = &folder.last_preview {
@@ -2121,7 +2386,8 @@ impl LierSyncApp {
 
         let entries = self.clipboard_guard.history();
         let mut hist_col =
-            column![text(tr(l, "История буфера обмена:", "Clipboard history:")).size(15)].spacing(6);
+            column![text(tr(l, "История буфера обмена:", "Clipboard history:")).size(15)]
+                .spacing(6);
         if entries.is_empty() {
             hist_col = hist_col.push(
                 text(tr(l, "История пуста", "History is empty"))
@@ -2132,7 +2398,9 @@ impl LierSyncApp {
             for entry in entries {
                 let (dir_icon, dir_label) = match entry.direction {
                     ClipboardDirection::Sent => (ICON_ARROW_UP, tr(l, "Отправлено", "Sent")),
-                    ClipboardDirection::Received => (ICON_ARROW_DOWN, tr(l, "Получено", "Received")),
+                    ClipboardDirection::Received => {
+                        (ICON_ARROW_DOWN, tr(l, "Получено", "Received"))
+                    }
                 };
                 hist_col = hist_col.push(
                     container(
@@ -2172,15 +2440,27 @@ impl LierSyncApp {
         let my_info_card = container(
             row![
                 column![
-                    text(tr(l, "Подключение, QR и проверка связи", "Connection, QR & Diagnostics")).size(15),
+                    text(tr(
+                        l,
+                        "Подключение, QR и проверка связи",
+                        "Connection, QR & Diagnostics"
+                    ))
+                    .size(15),
                     row![
-                        text(format!("{}: {}", tr(l, "Мой адрес", "My address"), self.local_addr_label))
-                            .size(13)
-                            .color(ACCENT_TEAL),
+                        text(format!(
+                            "{}: {}",
+                            tr(l, "Мой адрес", "My address"),
+                            self.local_addr_label
+                        ))
+                        .size(13)
+                        .color(ACCENT_TEAL),
                         button(
-                            row![icon(ICON_COPY, 14.0), text(tr(l, "Копировать", "Copy")).size(12)]
-                                .spacing(5)
-                                .align_y(Alignment::Center)
+                            row![
+                                icon(ICON_COPY, 14.0),
+                                text(tr(l, "Копировать", "Copy")).size(12)
+                            ]
+                            .spacing(5)
+                            .align_y(Alignment::Center)
                         )
                         .on_press(Message::CopyMyAddress)
                         .style(secondary_btn_style),
@@ -2194,14 +2474,19 @@ impl LierSyncApp {
                     .size(12)
                     .color(TEXT_MUTED),
                     row![
-                        text(tr(l, "Проверить пир:", "Ping peer:")).size(13).color(TEXT_MUTED),
+                        text(tr(l, "Проверить пир:", "Ping peer:"))
+                            .size(13)
+                            .color(TEXT_MUTED),
                         text_input("192.168.43.1:47789", &self.manual_addr)
                             .on_input(Message::ManualAddrChanged)
                             .width(200),
                         button(
-                            row![icon(ICON_SEARCH, 14.0), text(tr(l, "Проверить связь", "Ping peer")).size(12)]
-                                .spacing(5)
-                                .align_y(Alignment::Center)
+                            row![
+                                icon(ICON_SEARCH, 14.0),
+                                text(tr(l, "Проверить связь", "Ping peer")).size(12)
+                            ]
+                            .spacing(5)
+                            .align_y(Alignment::Center)
                         )
                         .on_press(Message::PingTarget)
                         .style(teal_btn_style),
@@ -2231,7 +2516,9 @@ impl LierSyncApp {
         let policy_card = container(
             column![
                 row![
-                    text(tr(l, "Приоритет маршрутизации:", "Routing policy:")).size(13).color(TEXT_MUTED),
+                    text(tr(l, "Приоритет маршрутизации:", "Routing policy:"))
+                        .size(13)
+                        .color(TEXT_MUTED),
                     pick_list(
                         policy_opts,
                         Some(PolicyChoice(self.channel_policy, l)),
@@ -2242,7 +2529,9 @@ impl LierSyncApp {
                 .spacing(10)
                 .align_y(Alignment::Center),
                 row![
-                    text(tr(l, "Relay / Внешний IP:", "Relay / External IP:")).size(13).color(TEXT_MUTED),
+                    text(tr(l, "Relay / Внешний IP:", "Relay / External IP:"))
+                        .size(13)
+                        .color(TEXT_MUTED),
                     text_input("relay.larevole.org:47790", &self.relay_endpoint)
                         .on_input(Message::RelayEndpointChanged)
                         .width(280),
@@ -2258,7 +2547,11 @@ impl LierSyncApp {
 
         let mut cards = column![].spacing(8);
         for ch in &self.channels {
-            let badge_color = if ch.available { ACCENT_TEAL } else { TEXT_MUTED };
+            let badge_color = if ch.available {
+                ACCENT_TEAL
+            } else {
+                TEXT_MUTED
+            };
             let badge = if ch.available {
                 tr(l, "Активен", "Active")
             } else {
@@ -2327,11 +2620,19 @@ impl LierSyncApp {
                 );
             }
         }
-        let bt_card = container(bt_rows).padding(12).width(Fill).style(surface_card_style);
+        let bt_card = container(bt_rows)
+            .padding(12)
+            .width(Fill)
+            .style(surface_card_style);
 
-        column![my_info_card, policy_card, bt_card, scrollable(cards).height(Fill)]
-            .spacing(10)
-            .into()
+        column![
+            my_info_card,
+            policy_card,
+            bt_card,
+            scrollable(cards).height(Fill)
+        ]
+        .spacing(10)
+        .into()
     }
 
     fn view_settings(&self) -> Element<'_, Message> {
@@ -2392,9 +2693,12 @@ impl LierSyncApp {
                     .color(TEXT_MUTED)
                     .width(Fill),
                     button(
-                        row![icon(ICON_FOLDER, 14.0), text(tr(l, "Открыть папку", "Open folder")).size(12)]
-                            .spacing(5)
-                            .align_y(Alignment::Center)
+                        row![
+                            icon(ICON_FOLDER, 14.0),
+                            text(tr(l, "Открыть папку", "Open folder")).size(12)
+                        ]
+                        .spacing(5)
+                        .align_y(Alignment::Center)
                     )
                     .on_press(Message::OpenDownloadsFolder)
                     .style(secondary_btn_style),
@@ -2440,9 +2744,16 @@ impl LierSyncApp {
 
         let network_card = container(
             column![
-                text(tr(l, "Сеть и каналы по умолчанию", "Default Network & Routing")).size(15),
+                text(tr(
+                    l,
+                    "Сеть и каналы по умолчанию",
+                    "Default Network & Routing"
+                ))
+                .size(15),
                 row![
-                    text(tr(l, "Адрес пира по умолчанию:", "Default peer address:")).size(13).color(TEXT_MUTED),
+                    text(tr(l, "Адрес пира по умолчанию:", "Default peer address:"))
+                        .size(13)
+                        .color(TEXT_MUTED),
                     text_input("192.168.43.1:47789", &self.manual_addr)
                         .on_input(Message::ManualAddrChanged)
                         .width(220),
@@ -2450,7 +2761,9 @@ impl LierSyncApp {
                 .spacing(10)
                 .align_y(Alignment::Center),
                 row![
-                    text(tr(l, "Приоритет маршрутизации:", "Routing policy:")).size(13).color(TEXT_MUTED),
+                    text(tr(l, "Приоритет маршрутизации:", "Routing policy:"))
+                        .size(13)
+                        .color(TEXT_MUTED),
                     pick_list(
                         policy_opts,
                         Some(PolicyChoice(self.channel_policy, l)),
@@ -2461,7 +2774,9 @@ impl LierSyncApp {
                 .spacing(10)
                 .align_y(Alignment::Center),
                 row![
-                    text(tr(l, "Relay / Внешний IP:", "Relay / External IP:")).size(13).color(TEXT_MUTED),
+                    text(tr(l, "Relay / Внешний IP:", "Relay / External IP:"))
+                        .size(13)
+                        .color(TEXT_MUTED),
                     text_input("relay.larevole.org:47790", &self.relay_endpoint)
                         .on_input(Message::RelayEndpointChanged)
                         .width(280),
@@ -2492,9 +2807,12 @@ impl LierSyncApp {
                 let key = tp.device_id.clone();
                 trusted_col = trusted_col.push(
                     row![
-                        text(format!("{} · {} ({})", tp.device_name, tp.fingerprint, tp.added_at))
-                            .size(12)
-                            .width(Fill),
+                        text(format!(
+                            "{} · {} ({})",
+                            tp.device_name, tp.fingerprint, tp.added_at
+                        ))
+                        .size(12)
+                        .width(Fill),
                         button(icon(ICON_TRASH, 13.0))
                             .on_press(Message::RemoveTrustedPeer(key))
                             .style(crimson_btn_style),
@@ -2537,9 +2855,13 @@ impl LierSyncApp {
                 .spacing(10)
                 .align_y(Alignment::Center),
                 row![
-                    text(tr(l, "Сопрячь с пиром (IP выше):", "Pair target peer (PIN):"))
-                        .size(12)
-                        .color(TEXT_MUTED),
+                    text(tr(
+                        l,
+                        "Сопрячь с пиром (IP выше):",
+                        "Pair target peer (PIN):"
+                    ))
+                    .size(12)
+                    .color(TEXT_MUTED),
                     text_input("PIN", &self.pair_pin_input)
                         .on_input(Message::PairPinInputChanged)
                         .width(100),
@@ -2560,18 +2882,14 @@ impl LierSyncApp {
         .width(Fill)
         .style(surface_card_style);
 
-        scrollable(
-            column![lang_card, security_card, behavior_card, network_card].spacing(10),
-        )
-        .height(Fill)
-        .into()
+        scrollable(column![lang_card, security_card, behavior_card, network_card].spacing(10))
+            .height(Fill)
+            .into()
     }
 
     fn view_about(&self) -> Element<'_, Message> {
         let l = self.language;
-        let logo_large = iced_image(self.logo_handle.clone())
-            .width(56)
-            .height(56);
+        let logo_large = iced_image(self.logo_handle.clone()).width(56).height(56);
         container(
             column![
                 row![
@@ -2579,7 +2897,7 @@ impl LierSyncApp {
                     column![
                         row![
                             text("LierSync").size(22),
-                            text("v1.1").size(13).color(ACCENT_TEAL),
+                            text("v1.2").size(13).color(ACCENT_TEAL),
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center),
@@ -2620,6 +2938,38 @@ impl LierSyncApp {
                 text(format!("{}: {}", tr(l, "Имя узла", "Node name"), self.identity.device_name)).size(12),
                 text(format!("{}: {}", tr(l, "Отпечаток", "Fingerprint"), self.identity.fingerprint)).size(12),
                 text(format!("{}: {}", tr(l, "Папка загрузок", "Downloads folder"), self.receive_dir.display())).size(12),
+                rule::horizontal(1),
+                row![
+                    text(tr(l, "Экосистема LIER (локальные мосты)", "LIER Ecosystem (local bridges)")).size(13),
+                    Space::new().width(Fill),
+                    button(text(tr(l, "Обновить", "Refresh")).size(11))
+                        .on_press(Message::RefreshEcosystem)
+                        .style(secondary_btn_style),
+                ]
+                .align_y(Alignment::Center),
+                column(
+                    self.ecosystem_apps
+                        .iter()
+                        .map(|app| {
+                            let badge_color = if app.online { ACCENT_TEAL } else { TEXT_MUTED };
+                            let state_label = if app.online {
+                                format!("ONLINE ({})", app.detail)
+                            } else {
+                                tr(l, "не запущено", "offline").to_string()
+                            };
+                            row![
+                                text(&app.name).size(12),
+                                text(format!(":{}", app.port)).size(12).color(TEXT_MUTED),
+                                Space::new().width(Fill),
+                                text(state_label).size(12).color(badge_color),
+                            ]
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .into()
+                        })
+                        .collect::<Vec<_>>()
+                )
+                .spacing(4),
             ]
             .spacing(10),
         )
@@ -2630,17 +2980,16 @@ impl LierSyncApp {
     }
 
     fn view_logs_card(&self, height: f32) -> Element<'_, Message> {
-        let mut log_col = column![text(tr(self.language, "Журнал событий:", "Event log:")).size(13)].spacing(3);
+        let mut log_col =
+            column![text(tr(self.language, "Журнал событий:", "Event log:")).size(13)].spacing(3);
         for line in &self.logs {
             log_col = log_col.push(text(line).size(12).color(TEXT_MUTED));
         }
-        container(
-            column![rule::horizontal(1), scrollable(log_col).height(height)].spacing(6),
-        )
-        .padding(10)
-        .width(Fill)
-        .style(surface_card_style)
-        .into()
+        container(column![rule::horizontal(1), scrollable(log_col).height(height)].spacing(6))
+            .padding(10)
+            .width(Fill)
+            .style(surface_card_style)
+            .into()
     }
 }
 
@@ -2659,7 +3008,11 @@ fn surface_card_style(_theme: &Theme) -> container::Style {
 
 fn teal_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
-        button::Status::Hovered => Color::from_rgb(0x48 as f32 / 255.0, 0xD8 as f32 / 255.0, 0xCE as f32 / 255.0),
+        button::Status::Hovered => Color::from_rgb(
+            0x48 as f32 / 255.0,
+            0xD8 as f32 / 255.0,
+            0xCE as f32 / 255.0,
+        ),
         button::Status::Disabled => BG_ELEVATED,
         _ => ACCENT_TEAL,
     };
@@ -2696,7 +3049,11 @@ fn crimson_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
 
 fn secondary_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
-        button::Status::Hovered => Color::from_rgb(0x2E as f32 / 255.0, 0x30 as f32 / 255.0, 0x3A as f32 / 255.0),
+        button::Status::Hovered => Color::from_rgb(
+            0x2E as f32 / 255.0,
+            0x30 as f32 / 255.0,
+            0x3A as f32 / 255.0,
+        ),
         _ => BG_ELEVATED,
     };
     button::Style {
@@ -2730,7 +3087,10 @@ fn install_windows_sendto() -> std::result::Result<std::path::PathBuf, String> {
          $s.Save()",
         esc(&lnk_path.to_string_lossy()),
         esc(&exe.to_string_lossy()),
-        esc(&exe.parent().unwrap_or(std::path::Path::new(".")).to_string_lossy()),
+        esc(&exe
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_string_lossy()),
     );
 
     let out = std::process::Command::new("powershell")
@@ -2830,7 +3190,11 @@ fn create_tray_icon(lang: AppLanguage) -> Option<TrayState> {
     let item_push_clip = MenuItem::new(tr(lang, "Отправить буфер", "Send clipboard"), true, None);
     let item_pull_clip = MenuItem::new(tr(lang, "Получить буфер", "Pull clipboard"), true, None);
     let item_open_dl = MenuItem::new(
-        tr(lang, "Открыть Загрузки\\LierSync", "Open Downloads\\LierSync"),
+        tr(
+            lang,
+            "Открыть Загрузки\\LierSync",
+            "Open Downloads\\LierSync",
+        ),
         true,
         None,
     );

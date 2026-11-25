@@ -184,7 +184,9 @@ pub fn preview_sync(remote: &MerkleTree, local: &MerkleTree) -> SyncPreview {
     for (rel, l_entry) in &local.files {
         match remote.files.get(rel) {
             None => preview.to_upload.push((rel.clone(), l_entry.size)),
-            Some(r_entry) if r_entry.file_hash != l_entry.file_hash && l_entry.mtime > r_entry.mtime => {
+            Some(r_entry)
+                if r_entry.file_hash != l_entry.file_hash && l_entry.mtime > r_entry.mtime =>
+            {
                 preview.to_upload.push((rel.clone(), l_entry.size));
             }
             _ => {}
@@ -272,10 +274,7 @@ pub fn create_conflict_copy(path: &Path) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     let stamp = Local::now().format("%Y%m%d-%H%M%S");
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
     let ext = path.extension().and_then(|e| e.to_str());
     let conflict_name = match ext {
         Some(e) => format!("{stem}.sync-conflict-{stamp}.{e}"),

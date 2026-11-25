@@ -122,8 +122,8 @@ pub async fn write_frame_with<W: AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     let raw = serde_json::to_vec(frame)?;
     let payload = cipher.seal(&raw)?;
-    let len = u32::try_from(payload.len())
-        .map_err(|_| LierError::Protocol("Frame too large".into()))?;
+    let len =
+        u32::try_from(payload.len()).map_err(|_| LierError::Protocol("Frame too large".into()))?;
     writer.write_all(&len.to_be_bytes()).await?;
     writer.write_all(&payload).await?;
     writer.flush().await?;

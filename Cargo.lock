@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "lier-sync-android"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "jni 0.21.1",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "lier-sync-cli"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "lier-sync-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2329,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "lier-sync-gui"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "iced",

@@ -1,21 +1,32 @@
 // LierSync — Copyright (C) 2026 LaRevole (LaRCorp) — GPL-3.0-only
 
+use crate::clipboard::ClipboardGuard;
+#[cfg(windows)]
 use crate::clipboard::{
     get_clipboard_image_png, get_clipboard_text, set_clipboard_image_png, set_clipboard_text,
-    ClipboardGuard,
 };
 use crate::error::{LierError, Result};
 use crate::identity::DeviceIdentity;
-use crate::merkle::{hash_bytes, hash_file, CHUNK_SIZE};
+#[cfg(windows)]
+use crate::merkle::{CHUNK_SIZE, hash_bytes, hash_file};
+#[cfg(windows)]
 use crate::protocol::Frame;
 use crate::security::SecurityManager;
-use crate::transport::{expand_paths_for_send, CoreEvent, DEFAULT_P2P_PORT};
+use crate::transport::CoreEvent;
+#[cfg(windows)]
+use crate::transport::{DEFAULT_P2P_PORT, expand_paths_for_send};
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
 use std::collections::HashMap;
+#[cfg(windows)]
 use std::fs::{self, File};
+#[cfg(windows)]
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
+#[cfg(windows)]
 use uuid::Uuid;
 
 /// LierSync RFCOMM Serial Port Profile (SPP) UUID shared across Windows & Android:
@@ -45,8 +56,10 @@ pub fn format_bt_mac(addr: u64) -> String {
     )
 }
 
+#[cfg(windows)]
 const MAX_BT_FRAME_LEN: usize = 16 * 1024 * 1024;
 
+#[cfg(windows)]
 fn write_sync_frame<W: Write>(w: &mut W, frame: &Frame) -> Result<()> {
     let raw = serde_json::to_vec(frame)?;
     let len = u32::try_from(raw.len())
@@ -57,6 +70,7 @@ fn write_sync_frame<W: Write>(w: &mut W, frame: &Frame) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn read_sync_frame<R: Read>(r: &mut R) -> Result<Option<Frame>> {
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf) {
@@ -79,18 +93,18 @@ fn read_sync_frame<R: Read>(r: &mut R) -> Result<Option<Frame>> {
 #[cfg(windows)]
 mod win_bt {
     use super::*;
-    use windows_sys::core::GUID;
     use windows_sys::Win32::Devices::Bluetooth::{
+        BLUETOOTH_DEVICE_INFO, BLUETOOTH_DEVICE_SEARCH_PARAMS, BLUETOOTH_FIND_RADIO_PARAMS,
         BluetoothFindDeviceClose, BluetoothFindFirstDevice, BluetoothFindFirstRadio,
-        BluetoothFindNextDevice, BluetoothFindRadioClose, BLUETOOTH_DEVICE_INFO,
-        BLUETOOTH_DEVICE_SEARCH_PARAMS, BLUETOOTH_FIND_RADIO_PARAMS,
+        BluetoothFindNextDevice, BluetoothFindRadioClose,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Networking::WinSock::{
-        accept, bind, closesocket, connect, getsockname, listen, recv, send, socket,
-        WSACleanup, WSASetServiceW, WSAStartup, CSADDR_INFO, RNRSERVICE_REGISTER, SOCKET,
-        SOCKET_ADDRESS, SOCKET_ERROR, SOCK_STREAM, WSADATA, WSAQUERYSETW,
+        CSADDR_INFO, RNRSERVICE_REGISTER, SOCK_STREAM, SOCKET, SOCKET_ADDRESS, SOCKET_ERROR,
+        WSACleanup, WSADATA, WSAQUERYSETW, WSASetServiceW, WSAStartup, accept, bind, closesocket,
+        connect, getsockname, listen, recv, send, socket,
     };
+    use windows_sys::core::GUID;
 
     const AF_BTH: u16 = 32;
     const BTHPROTO_RFCOMM: u32 = 3;
@@ -200,7 +214,9 @@ mod win_bt {
                     .iter()
                     .position(|&c| c == 0)
                     .unwrap_or(info.szName.len());
-                let name = String::from_utf16_lossy(&info.szName[..nul]).trim().to_string();
+                let name = String::from_utf16_lossy(&info.szName[..nul])
+                    .trim()
+                    .to_string();
                 let addr_raw = info.Address.Anonymous.ullLong;
                 out.push(BluetoothPeerInfo {
                     name: if name.is_empty() {
@@ -285,11 +301,7 @@ mod win_bt {
                     return;
                 }
                 let mut sa_len = std::mem::size_of::<SockAddrBth>() as i32;
-                let _ = getsockname(
-                    server,
-                    (&mut sa as *mut SockAddrBth).cast(),
-                    &mut sa_len,
-                );
+                let _ = getsockname(server, (&mut sa as *mut SockAddrBth).cast(), &mut sa_len);
                 if listen(server, 4) == SOCKET_ERROR {
                     let _ = closesocket(server);
                     return;
@@ -353,6 +365,7 @@ mod win_bt {
     }
 }
 
+#[cfg(windows)]
 fn handle_bt_client<S: Read + Write>(
     mut stream: S,
     identity: DeviceIdentity,
@@ -438,7 +451,13 @@ fn handle_bt_client<S: Read + Write>(
                     )?;
                     continue;
                 }
-                if clipboard_guard.accept_remote_image(&sender_name, width, height, &png_bytes, &sha256) {
+                if clipboard_guard.accept_remote_image(
+                    &sender_name,
+                    width,
+                    height,
+                    &png_bytes,
+                    &sha256,
+                ) {
                     let _ = set_clipboard_image_png(&png_bytes);
                     let _ = events.blocking_send(CoreEvent::ClipboardImageReceived {
                         from_peer: format!("{sender_name} (BT)"),
@@ -529,9 +548,7 @@ fn handle_bt_client<S: Read + Write>(
                 )?;
             }
             Frame::FileChunk {
-                transfer_id,
-                data,
-                ..
+                transfer_id, data, ..
             } => {
                 if let Some((_, _, _, _, file)) = active_transfers.get_mut(&transfer_id) {
                     file.write_all(&data)?;
@@ -577,7 +594,13 @@ pub fn has_bluetooth_radio() -> bool {
     {
         win_bt::has_radio()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir("/sys/class/bluetooth")
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false)
+    }
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     {
         false
     }
@@ -650,7 +673,9 @@ pub async fn send_bluetooth_clipboard_text(
         #[cfg(not(windows))]
         {
             let _ = (mac, identity, text);
-            Err(LierError::Protocol("Bluetooth RFCOMM requires Android or Windows".into()))
+            Err(LierError::Protocol(
+                "Bluetooth RFCOMM requires Android or Windows".into(),
+            ))
         }
     })
     .await
@@ -699,7 +724,9 @@ pub async fn send_bluetooth_clipboard_image(
         #[cfg(not(windows))]
         {
             let _ = (mac, identity, width, height, png_bytes);
-            Err(LierError::Protocol("Bluetooth RFCOMM requires Android or Windows".into()))
+            Err(LierError::Protocol(
+                "Bluetooth RFCOMM requires Android or Windows".into(),
+            ))
         }
     })
     .await
@@ -779,7 +806,9 @@ pub async fn send_bluetooth_quick_batch(
         #[cfg(not(windows))]
         {
             let _ = (mac, identity, paths);
-            Err(LierError::Protocol("Bluetooth RFCOMM requires Android or Windows".into()))
+            Err(LierError::Protocol(
+                "Bluetooth RFCOMM requires Android or Windows".into(),
+            ))
         }
     })
     .await

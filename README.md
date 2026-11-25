@@ -1,12 +1,12 @@
 <div align="center">
   <img src="crates/lier-sync-gui/assets/logo_128.png" width="96" height="96" alt="LierSync Logo" />
-  <h1>⚡🔄 LierSync v1.1 — Быстрая P2P-синхронизация файлов и буфера</h1>
+  <h1>⚡🔄 LierSync v1.2 — Быстрая P2P-синхронизация файлов и буфера</h1>
   <p><strong>Нативный кроссплатформенный клиент для ПК (Windows / Linux), CLI и Android для передачи файлов, синхронизации папок и общего буфера обмена на Rust</strong></p>
 
   <p>
     <a href="README.md"><img src="https://img.shields.io/badge/Язык-Русский-8B0000?style=flat-square" alt="Русский" /></a>
     <a href="README_EN.md"><img src="https://img.shields.io/badge/Language-English-39C5BB?style=flat-square" alt="English" /></a>
-    <a href="https://github.com/LaRCorp/LierSync/releases"><img src="https://img.shields.io/badge/release-v1.1-39C5BB?style=flat-square" alt="Release v1.1" /></a>
+    <a href="https://github.com/LaRCorp/LierSync/releases"><img src="https://img.shields.io/badge/release-v1.2-39C5BB?style=flat-square" alt="Release v1.2" /></a>
     <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20Android-8B0000?style=flat-square" alt="Windows | Linux | Android" />
     <img src="https://img.shields.io/badge/Rust-2024%20%7C%20iced%200.14%20%7C%20Jetpack%20Compose-39C5BB?style=flat-square" alt="Rust + iced + Jetpack Compose" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-10b981?style=flat-square" alt="GPLv3 License" /></a>

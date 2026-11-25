@@ -1,15 +1,15 @@
 // LierSync — Copyright (C) 2026 LaRevole (LaRCorp) — GPL-3.0-only
 
+use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jint, jstring};
-use jni::JNIEnv;
 use lier_sync_core::{
-    build_pairing_uri, compare_folder_with_peer, detect_local_ipv4s,
+    ClipboardGuard, CoreEvent, DEFAULT_P2P_PORT, DeviceIdentity, DiscoveryService,
+    RemoteClipboardPayload, SecurityManager, SecurityPolicy, SharedFolderRegistry, SyncDirection,
+    TrustedPeer, build_pairing_uri, compare_folder_with_peer, detect_local_ipv4s,
     fetch_clipboard_payload_from_peer, generate_qr_png, pair_with_peer, parse_pairing_uri,
     ping_peer, send_clipboard_image_png, send_clipboard_text, send_quick_batch,
-    start_p2p_server_secure, sync_folder_by_direction, ClipboardGuard, CoreEvent, DeviceIdentity,
-    DiscoveryService, RemoteClipboardPayload, SecurityManager, SecurityPolicy,
-    SharedFolderRegistry, SyncDirection, TrustedPeer, DEFAULT_P2P_PORT,
+    start_p2p_server_secure, sync_folder_by_direction,
 };
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -129,7 +129,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_in
             os: existing.identity.os.clone(),
             p2p_port: existing.p2p_port,
             receive_dir: existing.receive_dir.display().to_string(),
-            local_ips: detect_local_ipv4s().into_iter().map(|ip| ip.to_string()).collect(),
+            local_ips: detect_local_ipv4s()
+                .into_iter()
+                .map(|ip| ip.to_string())
+                .collect(),
         };
         return ret_jstr(&mut env, &serde_json::to_string(&info).unwrap_or_default());
     }
@@ -268,7 +271,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_in
         os: identity.os.clone(),
         p2p_port: bound_port,
         receive_dir: rx_dir.display().to_string(),
-        local_ips: detect_local_ipv4s().into_iter().map(|ip| ip.to_string()).collect(),
+        local_ips: detect_local_ipv4s()
+            .into_iter()
+            .map(|ip| ip.to_string())
+            .collect(),
     };
 
     let _ = NODE.set(Arc::new(AndroidNodeState {
@@ -321,7 +327,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_ge
             addr: p.addr.to_string(),
         })
         .collect();
-    ret_jstr(&mut env, &serde_json::to_string(&dtos).unwrap_or_else(|_| "[]".into()))
+    ret_jstr(
+        &mut env,
+        &serde_json::to_string(&dtos).unwrap_or_else(|_| "[]".into()),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -337,7 +346,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_po
         .lock()
         .map(|mut list| std::mem::take(&mut *list))
         .unwrap_or_default();
-    ret_jstr(&mut env, &serde_json::to_string(&drained).unwrap_or_else(|_| "[]".into()))
+    ret_jstr(
+        &mut env,
+        &serde_json::to_string(&drained).unwrap_or_else(|_| "[]".into()),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -351,7 +363,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_se
     let paths_raw = jstr(&mut env, &paths_json);
 
     let Ok(addr) = addr_str.trim().parse::<SocketAddr>() else {
-        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Invalid target address\"}");
+        return ret_jstr(
+            &mut env,
+            "{\"ok\":false,\"error\":\"Invalid target address\"}",
+        );
     };
     let paths: Vec<PathBuf> = serde_json::from_str::<Vec<String>>(&paths_raw)
         .unwrap_or_default()
@@ -360,7 +375,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_se
         .collect();
 
     let Some(state) = NODE.get() else {
-        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Node not initialized\"}");
+        return ret_jstr(
+            &mut env,
+            "{\"ok\":false,\"error\":\"Node not initialized\"}",
+        );
     };
     let id = state.identity.clone();
     let res = state
@@ -413,7 +431,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_co
         .rt
         .block_on(compare_folder_with_peer(addr, &id, &fid, &dir))
     {
-        Ok(preview) => ret_jstr(&mut env, &serde_json::to_string(&preview).unwrap_or_default()),
+        Ok(preview) => ret_jstr(
+            &mut env,
+            &serde_json::to_string(&preview).unwrap_or_default(),
+        ),
         Err(e) => ret_jstr(
             &mut env,
             &serde_json::json!({ "error": e.to_string() }).to_string(),
@@ -439,7 +460,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_sy
         return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Invalid address\"}");
     };
     let Some(state) = NODE.get() else {
-        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Node not initialized\"}");
+        return ret_jstr(
+            &mut env,
+            "{\"ok\":false,\"error\":\"Node not initialized\"}",
+        );
     };
     let id = state.identity.clone();
     match state
@@ -468,7 +492,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pu
         return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Invalid address\"}");
     };
     let Some(state) = NODE.get() else {
-        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Node not initialized\"}");
+        return ret_jstr(
+            &mut env,
+            "{\"ok\":false,\"error\":\"Node not initialized\"}",
+        );
     };
     let hash = match state.clipboard_guard.should_emit_local(&clip_text) {
         Some(h) => h,
@@ -509,7 +536,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pu
         return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Invalid image bytes\"}");
     };
     let Some(state) = NODE.get() else {
-        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Node not initialized\"}");
+        return ret_jstr(
+            &mut env,
+            "{\"ok\":false,\"error\":\"Node not initialized\"}",
+        );
     };
     let w = width.max(0) as u32;
     let h = height.max(0) as u32;
@@ -551,7 +581,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pu
         return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Node not running\"}");
     };
     let id = state.identity.clone();
-    match state.rt.block_on(fetch_clipboard_payload_from_peer(addr, &id)) {
+    match state
+        .rt
+        .block_on(fetch_clipboard_payload_from_peer(addr, &id))
+    {
         Ok(RemoteClipboardPayload::Text {
             sender_name,
             sha256,
@@ -563,7 +596,9 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pu
                     "{\"ok\":false,\"error\":\"Remote clipboard is empty\"}",
                 );
             }
-            let _ = state.clipboard_guard.accept_remote(&sender_name, &text, &sha256);
+            let _ = state
+                .clipboard_guard
+                .accept_remote(&sender_name, &text, &sha256);
             ret_jstr(
                 &mut env,
                 &serde_json::json!({
@@ -582,9 +617,13 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pu
             height,
             png_bytes,
         }) => {
-            let _ = state
-                .clipboard_guard
-                .accept_remote_image(&sender_name, width, height, &png_bytes, &sha256);
+            let _ = state.clipboard_guard.accept_remote_image(
+                &sender_name,
+                width,
+                height,
+                &png_bytes,
+                &sha256,
+            );
             let fname = format!(
                 "clip_pull_{}.png",
                 std::time::SystemTime::now()
@@ -627,7 +666,10 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pi
 ) -> jstring {
     let addr_str = jstr(&mut env, &target_addr);
     let Ok(addr) = addr_str.trim().parse::<SocketAddr>() else {
-        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Некорректный адрес (нужен ip:port)\"}");
+        return ret_jstr(
+            &mut env,
+            "{\"ok\":false,\"error\":\"Некорректный адрес (нужен ip:port)\"}",
+        );
     };
     let Some(state) = NODE.get() else {
         return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Узел не запущен\"}");
@@ -662,16 +704,20 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_ge
     let lang_code = jstr(&mut env, &lang);
     let app_lang = lier_sync_core::AppLanguage::from_code(&lang_code);
     let port = NODE.get().map(|s| s.p2p_port).unwrap_or(DEFAULT_P2P_PORT);
-    let list: Vec<ChannelDto> = lier_sync_core::probe_channels_for_lang(port, Some(&relay), app_lang)
-        .into_iter()
-        .map(|c| ChannelDto {
-            medium: c.medium.to_string(),
-            available: c.available,
-            endpoint_hint: c.endpoint_hint,
-            bandwidth_note: c.bandwidth_note.to_string(),
-        })
-        .collect();
-    ret_jstr(&mut env, &serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()))
+    let list: Vec<ChannelDto> =
+        lier_sync_core::probe_channels_for_lang(port, Some(&relay), app_lang)
+            .into_iter()
+            .map(|c| ChannelDto {
+                medium: c.medium.to_string(),
+                available: c.available,
+                endpoint_hint: c.endpoint_hint,
+                bandwidth_note: c.bandwidth_note.to_string(),
+            })
+            .collect();
+    ret_jstr(
+        &mut env,
+        &serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
+    )
 }
 
 #[derive(Deserialize)]
@@ -738,9 +784,11 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pa
     let id = state.identity.clone();
     match state.rt.block_on(pair_with_peer(addr, &id, &pin_str)) {
         Ok(peer) => {
-            state
-                .security
-                .add_or_update_trusted(&peer.device_id, &peer.device_name, &peer.fingerprint);
+            state.security.add_or_update_trusted(
+                &peer.device_id,
+                &peer.device_name,
+                &peer.fingerprint,
+            );
             ret_jstr(
                 &mut env,
                 &serde_json::json!({
@@ -807,6 +855,9 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pa
             })
             .to_string(),
         ),
-        None => ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Invalid LierSync QR code\"}"),
+        None => ret_jstr(
+            &mut env,
+            "{\"ok\":false,\"error\":\"Invalid LierSync QR code\"}",
+        ),
     }
 }

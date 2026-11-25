@@ -1,4 +1,4 @@
-﻿# LierSync Mobile — Build Rust core (.so) into Android jniLibs
+# LierSync Mobile — Build Rust core (.so) into Android jniLibs
 # Copyright (C) 2026 LaRevole (LaRCorp) — GPL-3.0-only
 
 $ErrorActionPreference = "Stop"

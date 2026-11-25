@@ -19,4 +19,4 @@ gradle assembleDebug
 ```
 > **Note:** Open the `mobile/` folder in **Android Studio** or run `gradle assembleDebug` with JDK 17/21 and Android SDK 35 (`ANDROID_HOME` configured).
 
-Licensed under **GNU GPLv3** — Copyright (C) 2026 LaRevole (LaRCorp).
+Licensed under **GNU GPLv3** — Copyright (C) 2026 LaRevole.

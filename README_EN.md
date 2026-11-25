@@ -177,7 +177,7 @@ The APK will be generated at `mobile/app/build/outputs/apk/debug/app-debug.apk`.
 
 Released under the **GNU General Public License v3.0 (GPLv3)** — see [LICENSE](LICENSE).
 
-Copyright (c) 2026 LaRevole (LaRCorp).
+Copyright (c) 2026 LaRevole.
 
 ---
 

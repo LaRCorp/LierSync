@@ -177,7 +177,7 @@ gradle assembleDebug
 
 Проект распространяется под свободной лицензией **GNU General Public License v3.0 (GPLv3)** — см. [LICENSE](LICENSE).
 
-Copyright (c) 2026 LaRevole (LaRCorp).
+Copyright (c) 2026 LaRevole.
 
 ---
 

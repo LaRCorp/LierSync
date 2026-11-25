@@ -2,6 +2,9 @@
 /dist
 /LierSync_Inbox
 *.exe
+*.apk
+*.aab
+*.so
 *.pdb
 *.log
 LRCC.txt
@@ -11,3 +14,11 @@ LRCC
 .lrcc/
 .DS_Store
 Thumbs.db
+mobile/.gradle/
+mobile/.kotlin/
+mobile/build/
+mobile/app/build/
+mobile/local.properties
+mobile/app/src/main/jniLibs/
+.gradle/
+local.properties

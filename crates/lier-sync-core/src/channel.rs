@@ -116,9 +116,9 @@ pub fn probe_channels_for_lang(
             },
             ChannelDescriptor {
                 medium: TransportMedium::Bluetooth,
-                available: false,
-                endpoint_hint: "RFCOMM / BLE (требуется сопряжение и нативный адаптер)".to_string(),
-                bandwidth_note: "Низкое энергопотребление · буфер обмена и мелкие файлы",
+                available: crate::bluetooth::has_bluetooth_radio(),
+                endpoint_hint: "RFCOMM SPP (7a3f21b0-4c8e-4e9b-9e12-a5b6c7d8e901)".to_string(),
+                bandwidth_note: "Низкое энергопотребление · буфер обмена и файлы",
             },
             ChannelDescriptor {
                 medium: TransportMedium::InternetRelay,
@@ -145,9 +145,9 @@ pub fn probe_channels_for_lang(
             },
             ChannelDescriptor {
                 medium: TransportMedium::Bluetooth,
-                available: false,
-                endpoint_hint: "RFCOMM / BLE (requires pairing & native adapter)".to_string(),
-                bandwidth_note: "Low power · clipboard & small files",
+                available: crate::bluetooth::has_bluetooth_radio(),
+                endpoint_hint: "RFCOMM SPP (7a3f21b0-4c8e-4e9b-9e12-a5b6c7d8e901)".to_string(),
+                bandwidth_note: "Low power · clipboard & files without Wi-Fi",
             },
             ChannelDescriptor {
                 medium: TransportMedium::InternetRelay,

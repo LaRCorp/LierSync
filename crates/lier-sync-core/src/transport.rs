@@ -1,7 +1,10 @@
 // LierSync — Copyright (C) 2026 LaRevole (LaRCorp) — GPL-3.0-only
 
-use crate::clipboard::{get_clipboard_text, set_clipboard_text, ClipboardGuard};
-use crate::config::SyncDirection;
+use crate::clipboard::{
+    get_clipboard_image_png, get_clipboard_text, set_clipboard_image_png, set_clipboard_text,
+    ClipboardGuard,
+};
+use crate::config::{SyncDirection, TrustedPeer};
 use crate::discovery::{DiscoveryService, PeerInfo};
 use crate::error::{LierError, Result};
 use crate::identity::DeviceIdentity;
@@ -9,7 +12,11 @@ use crate::merkle::{
     build_merkle_tree, create_conflict_copy, diff_trees, hash_bytes, hash_file, preview_sync,
     read_chunk, write_chunk, SyncPreview, CHUNK_SIZE,
 };
-use crate::protocol::{read_frame, write_frame, Frame};
+use crate::protocol::{read_frame_with, write_frame_with, Frame};
+use crate::security::{
+    derive_shared_secret, generate_ephemeral_keypair, SecurityManager, SecurityPolicy,
+    SessionCipher, StreamRole,
+};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Read;
@@ -37,10 +44,18 @@ pub enum CoreEvent {
         preview: String,
         full_text: String,
     },
+    ClipboardImageReceived {
+        from_peer: String,
+        width: u32,
+        height: u32,
+        png_bytes: Vec<u8>,
+        sha256: String,
+    },
     SyncActivity {
         folder_id: String,
         message: String,
     },
+    PeerPaired(TrustedPeer),
     Error(String),
 }
 
@@ -75,7 +90,7 @@ impl Default for SharedFolderRegistry {
     }
 }
 
-/// Start the P2P TCP server handling Quick Send, Folder Sync, and Clipboard Push.
+/// Start the P2P TCP server with default permissive security policy.
 pub async fn start_p2p_server(
     bind_addr: SocketAddr,
     identity: DeviceIdentity,
@@ -83,6 +98,31 @@ pub async fn start_p2p_server(
     folders: SharedFolderRegistry,
     clipboard_guard: ClipboardGuard,
     discovery: DiscoveryService,
+    events: mpsc::Sender<CoreEvent>,
+) -> Result<SocketAddr> {
+    start_p2p_server_secure(
+        bind_addr,
+        identity,
+        receive_dir,
+        folders,
+        clipboard_guard,
+        discovery,
+        SecurityManager::new(SecurityPolicy::default()),
+        events,
+    )
+    .await
+}
+
+/// Start the P2P TCP server with explicit `SecurityManager` (X25519+ChaCha20 & trusted whitelist).
+#[allow(clippy::too_many_arguments)]
+pub async fn start_p2p_server_secure(
+    bind_addr: SocketAddr,
+    identity: DeviceIdentity,
+    receive_dir: PathBuf,
+    folders: SharedFolderRegistry,
+    clipboard_guard: ClipboardGuard,
+    discovery: DiscoveryService,
+    security: SecurityManager,
     events: mpsc::Sender<CoreEvent>,
 ) -> Result<SocketAddr> {
     fs::create_dir_all(&receive_dir)?;
@@ -99,11 +139,22 @@ pub async fn start_p2p_server(
                     let reg = folders.clone();
                     let cb = clipboard_guard.clone();
                     let disc = discovery.clone();
+                    let sec = security.clone();
                     let ev = events.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, peer_addr, listen_port, id, rx_dir, reg, cb, disc, ev.clone())
-                                .await
+                        if let Err(e) = handle_connection(
+                            stream,
+                            peer_addr,
+                            listen_port,
+                            id,
+                            rx_dir,
+                            reg,
+                            cb,
+                            disc,
+                            sec,
+                            ev.clone(),
+                        )
+                        .await
                         {
                             let _ = ev.send(CoreEvent::Error(e.to_string())).await;
                         }
@@ -129,21 +180,57 @@ async fn handle_connection(
     folders: SharedFolderRegistry,
     clipboard_guard: ClipboardGuard,
     discovery: DiscoveryService,
+    security: SecurityManager,
     events: mpsc::Sender<CoreEvent>,
 ) -> Result<()> {
     let mut peer_name = "Unknown".to_string();
+    let mut peer_trusted = !security.whitelist_only();
+    let mut cipher = SessionCipher::Plain;
     let mut active_transfers: HashMap<String, (PathBuf, Option<String>, String, u64, std::fs::File)> =
         HashMap::new();
 
-    while let Some(frame) = read_frame(&mut stream).await? {
+    while let Some(frame) = read_frame_with(&mut stream, &mut cipher).await? {
         match frame {
+            Frame::KeyExchange { public_key } => {
+                if security.encrypt_enabled() {
+                    let (sec_key, pub_key) = generate_ephemeral_keypair();
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::KeyExchange { public_key: pub_key },
+                        &mut cipher,
+                    )
+                    .await?;
+                    let shared = derive_shared_secret(sec_key, &public_key);
+                    cipher = SessionCipher::from_shared_secret(
+                        &shared,
+                        &public_key,
+                        &pub_key,
+                        StreamRole::Server,
+                    );
+                } else {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::Ack {
+                            message: "plain".into(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                }
+            }
             Frame::Hello {
                 device_id,
                 device_name,
                 os,
+                fingerprint,
                 p2p_port,
             } => {
                 peer_name = device_name.clone();
+                if security.whitelist_only() {
+                    peer_trusted = security.is_trusted(&device_id, &fingerprint);
+                } else {
+                    peer_trusted = true;
+                }
                 if let Some(port) = p2p_port {
                     discovery
                         .register_peer(PeerInfo {
@@ -155,16 +242,56 @@ async fn handle_connection(
                         })
                         .await;
                 }
-                write_frame(
+                write_frame_with(
                     &mut stream,
                     &Frame::Hello {
                         device_id: identity.device_id.clone(),
                         device_name: identity.device_name.clone(),
                         os: identity.os.clone(),
+                        fingerprint: identity.fingerprint.clone(),
                         p2p_port: Some(listen_port),
                     },
+                    &mut cipher,
                 )
                 .await?;
+            }
+            Frame::PairRequest {
+                device_id,
+                device_name,
+                fingerprint,
+                pin,
+            } => {
+                if security.verify_pin(&pin) {
+                    let paired = security.add_or_update_trusted(&device_id, &device_name, &fingerprint);
+                    peer_trusted = true;
+                    peer_name = device_name;
+                    let _ = events.send(CoreEvent::PeerPaired(paired)).await;
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::PairResponse {
+                            accepted: true,
+                            device_id: identity.device_id.clone(),
+                            device_name: identity.device_name.clone(),
+                            fingerprint: identity.fingerprint.clone(),
+                            reason: "Paired".into(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                } else {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::PairResponse {
+                            accepted: false,
+                            device_id: identity.device_id.clone(),
+                            device_name: identity.device_name.clone(),
+                            fingerprint: identity.fingerprint.clone(),
+                            reason: "Invalid PIN".into(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                }
             }
             Frame::QuickSendOffer {
                 transfer_id,
@@ -173,6 +300,18 @@ async fn handle_connection(
                 file_size,
                 sha256,
             } => {
+                if security.whitelist_only() && !peer_trusted {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::QuickSendAccept {
+                            transfer_id,
+                            accepted: false,
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                    continue;
+                }
                 let rel_for_event = rel_path.clone();
                 let dest_path = if let Some(rel) = rel_path {
                     let candidate = safe_join(&receive_dir, &rel)?;
@@ -202,12 +341,13 @@ async fn handle_connection(
                     transfer_id.clone(),
                     (dest_path, rel_for_event, sha256, file_size, file),
                 );
-                write_frame(
+                write_frame_with(
                     &mut stream,
                     &Frame::QuickSendAccept {
                         transfer_id,
                         accepted: true,
                     },
+                    &mut cipher,
                 )
                 .await?;
             }
@@ -234,11 +374,12 @@ async fn handle_connection(
                             dest_path.display().to_string(),
                         ));
                     }
-                    write_frame(
+                    write_frame_with(
                         &mut stream,
                         &Frame::Ack {
                             message: "File received".into(),
                         },
+                        &mut cipher,
                     )
                     .await?;
                     let _ = events
@@ -257,15 +398,32 @@ async fn handle_connection(
                 }
             }
             Frame::SyncTreeRequest { folder_id } => {
+                if security.whitelist_only() && !peer_trusted {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::Error {
+                            message: "Device not paired / untrusted".into(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                    continue;
+                }
                 if let Some(dir) = folders.get(&folder_id).await {
                     let tree = build_merkle_tree(&dir)?;
-                    write_frame(&mut stream, &Frame::SyncTreeResponse { folder_id, tree }).await?;
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::SyncTreeResponse { folder_id, tree },
+                        &mut cipher,
+                    )
+                    .await?;
                 } else {
-                    write_frame(
+                    write_frame_with(
                         &mut stream,
                         &Frame::Error {
                             message: format!("Unknown shared folder: {folder_id}"),
                         },
+                        &mut cipher,
                     )
                     .await?;
                 }
@@ -275,6 +433,17 @@ async fn handle_connection(
                 rel_path,
                 chunk_index,
             } => {
+                if security.whitelist_only() && !peer_trusted {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::Error {
+                            message: "Device not paired / untrusted".into(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                    continue;
+                }
                 if let Some(dir) = folders.get(&folder_id).await {
                     let full_path = safe_join(&dir, &rel_path)?;
                     let data = if full_path.exists() {
@@ -284,7 +453,7 @@ async fn handle_connection(
                     };
                     let file_size = fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
                     let total_chunks = ((file_size as usize) + CHUNK_SIZE - 1) / CHUNK_SIZE.max(1);
-                    write_frame(
+                    write_frame_with(
                         &mut stream,
                         &Frame::SyncChunkData {
                             folder_id,
@@ -294,6 +463,7 @@ async fn handle_connection(
                             file_mtime: 0,
                             data,
                         },
+                        &mut cipher,
                     )
                     .await?;
                 }
@@ -305,22 +475,35 @@ async fn handle_connection(
                 data,
                 ..
             } => {
+                if security.whitelist_only() && !peer_trusted {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::Error {
+                            message: "Device not paired / untrusted".into(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                    continue;
+                }
                 if let Some(dir) = folders.get(&folder_id).await {
                     let dest = safe_join(&dir, &rel_path)?;
                     write_chunk(&dest, chunk_index, &data)?;
-                    write_frame(
+                    write_frame_with(
                         &mut stream,
                         &Frame::Ack {
                             message: "Chunk stored".into(),
                         },
+                        &mut cipher,
                     )
                     .await?;
                 } else {
-                    write_frame(
+                    write_frame_with(
                         &mut stream,
                         &Frame::Error {
                             message: format!("Unknown shared folder: {folder_id}"),
                         },
+                        &mut cipher,
                     )
                     .await?;
                 }
@@ -331,6 +514,17 @@ async fn handle_connection(
                 text,
                 ..
             } => {
+                if security.whitelist_only() && !peer_trusted {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::Error {
+                            message: "Device not paired / untrusted".into(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                    continue;
+                }
                 if clipboard_guard.accept_remote(&sender_name, &text, &sha256) {
                     let _ = set_clipboard_text(&text);
                     let _ = events
@@ -341,32 +535,134 @@ async fn handle_connection(
                         })
                         .await;
                 }
-                write_frame(
+                write_frame_with(
                     &mut stream,
                     &Frame::Ack {
                         message: "Clipboard synced".into(),
                     },
+                    &mut cipher,
+                )
+                .await?;
+            }
+            Frame::ClipboardImagePush {
+                sender_name,
+                sha256,
+                width,
+                height,
+                png_bytes,
+                ..
+            } => {
+                if security.whitelist_only() && !peer_trusted {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::Error {
+                            message: "Device not paired / untrusted".into(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                    continue;
+                }
+                if clipboard_guard.accept_remote_image(&sender_name, width, height, &png_bytes, &sha256) {
+                    let _ = set_clipboard_image_png(&png_bytes);
+                    let _ = events
+                        .send(CoreEvent::ClipboardImageReceived {
+                            from_peer: sender_name,
+                            width,
+                            height,
+                            png_bytes,
+                            sha256,
+                        })
+                        .await;
+                }
+                write_frame_with(
+                    &mut stream,
+                    &Frame::Ack {
+                        message: "Clipboard image synced".into(),
+                    },
+                    &mut cipher,
                 )
                 .await?;
             }
             Frame::ClipboardPullRequest => {
-                let text = get_clipboard_text().unwrap_or_else(|_| {
-                    clipboard_guard
-                        .history()
-                        .first()
-                        .map(|e| e.full_text.clone())
-                        .unwrap_or_default()
-                });
-                let sha256 = hash_bytes(text.as_bytes());
-                write_frame(
-                    &mut stream,
-                    &Frame::ClipboardPullResponse {
-                        sender_name: identity.device_name.clone(),
-                        sha256,
-                        text,
-                    },
-                )
-                .await?;
+                if security.whitelist_only() && !peer_trusted {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::Error {
+                            message: "Device not paired / untrusted".into(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                    continue;
+                }
+                if let Some(text) = get_clipboard_text().ok().filter(|t| !t.is_empty()) {
+                    let sha256 = hash_bytes(text.as_bytes());
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::ClipboardPullResponse {
+                            sender_name: identity.device_name.clone(),
+                            sha256,
+                            text,
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                } else if let Ok((width, height, png_bytes)) = get_clipboard_image_png() {
+                    let sha256 = hash_bytes(&png_bytes);
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::ClipboardImageResponse {
+                            sender_name: identity.device_name.clone(),
+                            sha256,
+                            width,
+                            height,
+                            png_bytes,
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                } else if let Some(last) = clipboard_guard.history().into_iter().next() {
+                    if last.is_image {
+                        if let Some(png_bytes) = last.image_png {
+                            write_frame_with(
+                                &mut stream,
+                                &Frame::ClipboardImageResponse {
+                                    sender_name: identity.device_name.clone(),
+                                    sha256: last.sha256,
+                                    width: 0,
+                                    height: 0,
+                                    png_bytes,
+                                },
+                                &mut cipher,
+                            )
+                            .await?;
+                            continue;
+                        }
+                    }
+                    let sha256 = hash_bytes(last.full_text.as_bytes());
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::ClipboardPullResponse {
+                            sender_name: identity.device_name.clone(),
+                            sha256,
+                            text: last.full_text,
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                } else {
+                    write_frame_with(
+                        &mut stream,
+                        &Frame::ClipboardPullResponse {
+                            sender_name: identity.device_name.clone(),
+                            sha256: hash_bytes(b""),
+                            text: String::new(),
+                        },
+                        &mut cipher,
+                    )
+                    .await?;
+                }
             }
             _ => {}
         }
@@ -374,6 +670,117 @@ async fn handle_connection(
 
     let _ = stream.shutdown().await;
     Ok(())
+}
+
+/// Shared client helper: connects, negotiates X25519+ChaCha20 encryption, and exchanges `Hello`.
+async fn connect_secure(
+    addr: SocketAddr,
+    identity: &DeviceIdentity,
+    timeout_secs: Option<u64>,
+) -> Result<(TcpStream, SessionCipher, Option<Frame>)> {
+    let mut stream = if let Some(secs) = timeout_secs {
+        tokio::time::timeout(std::time::Duration::from_secs(secs), TcpStream::connect(addr))
+            .await
+            .map_err(|_| LierError::Protocol(format!("Таймаут подключения к {addr}")))??
+    } else {
+        TcpStream::connect(addr).await?
+    };
+
+    let mut cipher = SessionCipher::Plain;
+    let (c_sec, c_pub) = generate_ephemeral_keypair();
+    write_frame_with(
+        &mut stream,
+        &Frame::KeyExchange { public_key: c_pub },
+        &mut cipher,
+    )
+    .await?;
+
+    let kex_reply = if let Some(secs) = timeout_secs {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(secs),
+            read_frame_with(&mut stream, &mut cipher),
+        )
+        .await
+        .map_err(|_| LierError::Protocol("Таймаут ответа от узла".into()))??
+    } else {
+        read_frame_with(&mut stream, &mut cipher).await?
+    };
+
+    if let Some(Frame::KeyExchange {
+        public_key: s_pub,
+    }) = kex_reply
+    {
+        let shared = derive_shared_secret(c_sec, &s_pub);
+        cipher = SessionCipher::from_shared_secret(&shared, &c_pub, &s_pub, StreamRole::Client);
+    }
+
+    write_frame_with(
+        &mut stream,
+        &Frame::Hello {
+            device_id: identity.device_id.clone(),
+            device_name: identity.device_name.clone(),
+            os: identity.os.clone(),
+            fingerprint: identity.fingerprint.clone(),
+            p2p_port: Some(DEFAULT_P2P_PORT),
+        },
+        &mut cipher,
+    )
+    .await?;
+
+    let hello_reply = if let Some(secs) = timeout_secs {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(secs),
+            read_frame_with(&mut stream, &mut cipher),
+        )
+        .await
+        .map_err(|_| LierError::Protocol("Таймаут ответа от узла".into()))??
+    } else {
+        read_frame_with(&mut stream, &mut cipher).await?
+    };
+
+    Ok((stream, cipher, hello_reply))
+}
+
+/// Pair with a remote peer using its 6-digit PIN (or QR PIN), returning the peer's trusted identity.
+pub async fn pair_with_peer(
+    addr: SocketAddr,
+    identity: &DeviceIdentity,
+    pin: &str,
+) -> Result<TrustedPeer> {
+    let (mut stream, mut cipher, _) = connect_secure(addr, identity, Some(5)).await?;
+    write_frame_with(
+        &mut stream,
+        &Frame::PairRequest {
+            device_id: identity.device_id.clone(),
+            device_name: identity.device_name.clone(),
+            fingerprint: identity.fingerprint.clone(),
+            pin: pin.trim().to_string(),
+        },
+        &mut cipher,
+    )
+    .await?;
+
+    match read_frame_with(&mut stream, &mut cipher).await? {
+        Some(Frame::PairResponse {
+            accepted: true,
+            device_id,
+            device_name,
+            fingerprint,
+            ..
+        }) => Ok(TrustedPeer {
+            device_id,
+            device_name,
+            fingerprint,
+            added_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        }),
+        Some(Frame::PairResponse {
+            accepted: false,
+            reason,
+            ..
+        }) => Err(LierError::Protocol(reason)),
+        Some(Frame::Error { message }) => Err(LierError::Protocol(message)),
+        _ => Err(LierError::Protocol("Unexpected pairing response".into())),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -448,18 +855,7 @@ where
     let total_bytes: u64 = items.iter().map(|i| i.size).sum();
     let total_files = items.len();
 
-    let mut stream = TcpStream::connect(addr).await?;
-    write_frame(
-        &mut stream,
-        &Frame::Hello {
-            device_id: identity.device_id.clone(),
-            device_name: identity.device_name.clone(),
-            os: identity.os.clone(),
-            p2p_port: Some(DEFAULT_P2P_PORT),
-        },
-    )
-    .await?;
-    let _ = read_frame(&mut stream).await?;
+    let (mut stream, mut cipher, _) = connect_secure(addr, identity, None).await?;
 
     let mut sent_bytes_all = 0u64;
     let mut buf = vec![0u8; CHUNK_SIZE];
@@ -474,7 +870,7 @@ where
             .unwrap_or("file")
             .to_string();
 
-        write_frame(
+        write_frame_with(
             &mut stream,
             &Frame::QuickSendOffer {
                 transfer_id: transfer_id.clone(),
@@ -483,14 +879,16 @@ where
                 file_size: item.size,
                 sha256,
             },
+            &mut cipher,
         )
         .await?;
 
-        match read_frame(&mut stream).await? {
+        match read_frame_with(&mut stream, &mut cipher).await? {
             Some(Frame::QuickSendAccept { accepted: true, .. }) => {}
             Some(Frame::QuickSendAccept {
                 accepted: false, ..
-            }) => return Err(LierError::Protocol("Peer rejected transfer".into())),
+            }) => return Err(LierError::Protocol("Peer rejected transfer (check pairing/whitelist)".into())),
+            Some(Frame::Error { message }) => return Err(LierError::Protocol(message)),
             _ => return Err(LierError::Protocol("Unexpected response to offer".into())),
         }
 
@@ -501,13 +899,14 @@ where
             if n == 0 {
                 break;
             }
-            write_frame(
+            write_frame_with(
                 &mut stream,
                 &Frame::FileChunk {
                     transfer_id: transfer_id.clone(),
                     offset,
                     data: buf[..n].to_vec(),
                 },
+                &mut cipher,
             )
             .await?;
             offset += n as u64;
@@ -515,8 +914,8 @@ where
             on_progress(idx + 1, total_files, sent_bytes_all, total_bytes, &item.rel_path);
         }
 
-        write_frame(&mut stream, &Frame::QuickSendDone { transfer_id }).await?;
-        let _ = read_frame(&mut stream).await?;
+        write_frame_with(&mut stream, &Frame::QuickSendDone { transfer_id }, &mut cipher).await?;
+        let _ = read_frame_with(&mut stream, &mut cipher).await?;
     }
 
     Ok(total_files)
@@ -542,20 +941,9 @@ where
     let sha256 = hash_file(file_path)?;
     let transfer_id = Uuid::new_v4().to_string();
 
-    let mut stream = TcpStream::connect(addr).await?;
-    write_frame(
-        &mut stream,
-        &Frame::Hello {
-            device_id: identity.device_id.clone(),
-            device_name: identity.device_name.clone(),
-            os: identity.os.clone(),
-            p2p_port: Some(DEFAULT_P2P_PORT),
-        },
-    )
-    .await?;
-    let _ = read_frame(&mut stream).await?;
+    let (mut stream, mut cipher, _) = connect_secure(addr, identity, None).await?;
 
-    write_frame(
+    write_frame_with(
         &mut stream,
         &Frame::QuickSendOffer {
             transfer_id: transfer_id.clone(),
@@ -564,14 +952,16 @@ where
             file_size,
             sha256,
         },
+        &mut cipher,
     )
     .await?;
 
-    match read_frame(&mut stream).await? {
+    match read_frame_with(&mut stream, &mut cipher).await? {
         Some(Frame::QuickSendAccept { accepted: true, .. }) => {}
         Some(Frame::QuickSendAccept {
             accepted: false, ..
-        }) => return Err(LierError::Protocol("Peer rejected transfer".into())),
+        }) => return Err(LierError::Protocol("Peer rejected transfer (check pairing/whitelist)".into())),
+        Some(Frame::Error { message }) => return Err(LierError::Protocol(message)),
         _ => return Err(LierError::Protocol("Unexpected response to offer".into())),
     }
 
@@ -583,21 +973,22 @@ where
         if n == 0 {
             break;
         }
-        write_frame(
+        write_frame_with(
             &mut stream,
             &Frame::FileChunk {
                 transfer_id: transfer_id.clone(),
                 offset,
                 data: buf[..n].to_vec(),
             },
+            &mut cipher,
         )
         .await?;
         offset += n as u64;
         on_progress(offset, file_size);
     }
 
-    write_frame(&mut stream, &Frame::QuickSendDone { transfer_id }).await?;
-    let _ = read_frame(&mut stream).await?;
+    write_frame_with(&mut stream, &Frame::QuickSendDone { transfer_id }, &mut cipher).await?;
+    let _ = read_frame_with(&mut stream, &mut cipher).await?;
     Ok(())
 }
 
@@ -608,28 +999,18 @@ pub async fn compare_folder_with_peer(
     folder_id: &str,
     local_dir: &Path,
 ) -> Result<SyncPreview> {
-    let mut stream = TcpStream::connect(addr).await?;
-    write_frame(
-        &mut stream,
-        &Frame::Hello {
-            device_id: identity.device_id.clone(),
-            device_name: identity.device_name.clone(),
-            os: identity.os.clone(),
-            p2p_port: Some(DEFAULT_P2P_PORT),
-        },
-    )
-    .await?;
-    let _ = read_frame(&mut stream).await?;
+    let (mut stream, mut cipher, _) = connect_secure(addr, identity, Some(5)).await?;
 
-    write_frame(
+    write_frame_with(
         &mut stream,
         &Frame::SyncTreeRequest {
             folder_id: folder_id.to_string(),
         },
+        &mut cipher,
     )
     .await?;
 
-    let remote_tree = match read_frame(&mut stream).await? {
+    let remote_tree = match read_frame_with(&mut stream, &mut cipher).await? {
         Some(Frame::SyncTreeResponse { tree, .. }) => tree,
         Some(Frame::Error { message }) => return Err(LierError::Protocol(message)),
         _ => return Err(LierError::Protocol("Expected SyncTreeResponse".into())),
@@ -647,29 +1028,18 @@ pub async fn sync_folder_from_peer(
     local_dir: &Path,
 ) -> Result<usize> {
     fs::create_dir_all(local_dir)?;
-    let mut stream = TcpStream::connect(addr).await?;
+    let (mut stream, mut cipher, _) = connect_secure(addr, identity, Some(8)).await?;
 
-    write_frame(
-        &mut stream,
-        &Frame::Hello {
-            device_id: identity.device_id.clone(),
-            device_name: identity.device_name.clone(),
-            os: identity.os.clone(),
-            p2p_port: Some(DEFAULT_P2P_PORT),
-        },
-    )
-    .await?;
-    let _ = read_frame(&mut stream).await?;
-
-    write_frame(
+    write_frame_with(
         &mut stream,
         &Frame::SyncTreeRequest {
             folder_id: folder_id.to_string(),
         },
+        &mut cipher,
     )
     .await?;
 
-    let remote_tree = match read_frame(&mut stream).await? {
+    let remote_tree = match read_frame_with(&mut stream, &mut cipher).await? {
         Some(Frame::SyncTreeResponse { tree, .. }) => tree,
         Some(Frame::Error { message }) => return Err(LierError::Protocol(message)),
         _ => return Err(LierError::Protocol("Expected SyncTreeResponse".into())),
@@ -686,17 +1056,18 @@ pub async fn sync_folder_from_peer(
 
     let mut fetched = 0usize;
     for (rel_path, chunk_index) in &diff.chunks_to_fetch {
-        write_frame(
+        write_frame_with(
             &mut stream,
             &Frame::SyncChunkRequest {
                 folder_id: folder_id.to_string(),
                 rel_path: rel_path.clone(),
                 chunk_index: *chunk_index,
             },
+            &mut cipher,
         )
         .await?;
 
-        if let Some(Frame::SyncChunkData { data, .. }) = read_frame(&mut stream).await? {
+        if let Some(Frame::SyncChunkData { data, .. }) = read_frame_with(&mut stream, &mut cipher).await? {
             let dest = safe_join(local_dir, rel_path)?;
             write_chunk(&dest, *chunk_index, &data)?;
             fetched += 1;
@@ -716,28 +1087,18 @@ pub async fn push_folder_to_peer(
     if !local_dir.exists() {
         return Ok(0);
     }
-    let mut stream = TcpStream::connect(addr).await?;
-    write_frame(
-        &mut stream,
-        &Frame::Hello {
-            device_id: identity.device_id.clone(),
-            device_name: identity.device_name.clone(),
-            os: identity.os.clone(),
-            p2p_port: Some(DEFAULT_P2P_PORT),
-        },
-    )
-    .await?;
-    let _ = read_frame(&mut stream).await?;
+    let (mut stream, mut cipher, _) = connect_secure(addr, identity, Some(8)).await?;
 
-    write_frame(
+    write_frame_with(
         &mut stream,
         &Frame::SyncTreeRequest {
             folder_id: folder_id.to_string(),
         },
+        &mut cipher,
     )
     .await?;
 
-    let remote_tree = match read_frame(&mut stream).await? {
+    let remote_tree = match read_frame_with(&mut stream, &mut cipher).await? {
         Some(Frame::SyncTreeResponse { tree, .. }) => tree,
         Some(Frame::Error { message }) => return Err(LierError::Protocol(message)),
         _ => return Err(LierError::Protocol("Expected SyncTreeResponse".into())),
@@ -755,7 +1116,7 @@ pub async fn push_folder_to_peer(
         let data = read_chunk(&full_path, *chunk_index)?;
         let file_size = fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
         let total_chunks = (((file_size as usize) + CHUNK_SIZE - 1) / CHUNK_SIZE.max(1)).max(1);
-        write_frame(
+        write_frame_with(
             &mut stream,
             &Frame::SyncChunkData {
                 folder_id: folder_id.to_string(),
@@ -765,9 +1126,10 @@ pub async fn push_folder_to_peer(
                 file_mtime: 0,
                 data,
             },
+            &mut cipher,
         )
         .await?;
-        match read_frame(&mut stream).await? {
+        match read_frame_with(&mut stream, &mut cipher).await? {
             Some(Frame::Ack { .. }) => pushed += 1,
             Some(Frame::Error { message }) => return Err(LierError::Protocol(message)),
             _ => {}
@@ -799,32 +1161,64 @@ pub async fn sync_folder_by_direction(
 /// Measure round-trip connectivity and retrieve remote peer name/OS via `Hello` handshake.
 pub async fn ping_peer(addr: SocketAddr, identity: &DeviceIdentity) -> Result<(String, String, u128)> {
     let started = std::time::Instant::now();
-    let mut stream = tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        TcpStream::connect(addr),
-    )
-    .await
-    .map_err(|_| LierError::Protocol(format!("Таймаут подключения к {addr}")))??;
-
-    write_frame(
-        &mut stream,
-        &Frame::Hello {
-            device_id: identity.device_id.clone(),
-            device_name: identity.device_name.clone(),
-            os: identity.os.clone(),
-            p2p_port: Some(DEFAULT_P2P_PORT),
-        },
-    )
-    .await?;
-
-    match tokio::time::timeout(std::time::Duration::from_secs(4), read_frame(&mut stream)).await {
-        Ok(Ok(Some(Frame::Hello { device_name, os, .. }))) => {
+    let (_, _, hello) = connect_secure(addr, identity, Some(4)).await?;
+    match hello {
+        Some(Frame::Hello { device_name, os, .. }) => {
             let ms = started.elapsed().as_millis();
             Ok((device_name, os, ms))
         }
-        Ok(Ok(_)) => Err(LierError::Protocol("Неожиданный ответ от узла".into())),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(LierError::Protocol("Таймаут ответа от узла".into())),
+        _ => Err(LierError::Protocol("Неожиданный ответ от узла".into())),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RemoteClipboardPayload {
+    Text {
+        sender_name: String,
+        sha256: String,
+        text: String,
+    },
+    Image {
+        sender_name: String,
+        sha256: String,
+        width: u32,
+        height: u32,
+        png_bytes: Vec<u8>,
+    },
+}
+
+/// Pull either text or PNG image from a remote peer's clipboard.
+pub async fn fetch_clipboard_payload_from_peer(
+    addr: SocketAddr,
+    identity: &DeviceIdentity,
+) -> Result<RemoteClipboardPayload> {
+    let (mut stream, mut cipher, _) = connect_secure(addr, identity, Some(6)).await?;
+    write_frame_with(&mut stream, &Frame::ClipboardPullRequest, &mut cipher).await?;
+    match read_frame_with(&mut stream, &mut cipher).await? {
+        Some(Frame::ClipboardPullResponse {
+            sender_name,
+            sha256,
+            text,
+        }) => Ok(RemoteClipboardPayload::Text {
+            sender_name,
+            sha256,
+            text,
+        }),
+        Some(Frame::ClipboardImageResponse {
+            sender_name,
+            sha256,
+            width,
+            height,
+            png_bytes,
+        }) => Ok(RemoteClipboardPayload::Image {
+            sender_name,
+            sha256,
+            width,
+            height,
+            png_bytes,
+        }),
+        Some(Frame::Error { message }) => Err(LierError::Protocol(message)),
+        _ => Err(LierError::Protocol("Неожиданный ответ на запрос буфера".into())),
     }
 }
 
@@ -833,34 +1227,42 @@ pub async fn fetch_clipboard_from_peer(
     addr: SocketAddr,
     identity: &DeviceIdentity,
 ) -> Result<(String, String, String)> {
-    let mut stream = tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        TcpStream::connect(addr),
-    )
-    .await
-    .map_err(|_| LierError::Protocol(format!("Таймаут подключения к {addr}")))??;
-
-    write_frame(
-        &mut stream,
-        &Frame::Hello {
-            device_id: identity.device_id.clone(),
-            device_name: identity.device_name.clone(),
-            os: identity.os.clone(),
-            p2p_port: Some(DEFAULT_P2P_PORT),
-        },
-    )
-    .await?;
-    let _ = read_frame(&mut stream).await?;
-
-    write_frame(&mut stream, &Frame::ClipboardPullRequest).await?;
-    match read_frame(&mut stream).await? {
-        Some(Frame::ClipboardPullResponse {
+    match fetch_clipboard_payload_from_peer(addr, identity).await? {
+        RemoteClipboardPayload::Text {
             sender_name,
             sha256,
             text,
-        }) => Ok((sender_name, sha256, text)),
+        } => Ok((sender_name, sha256, text)),
+        RemoteClipboardPayload::Image { .. } => Ok((String::new(), String::new(), String::new())),
+    }
+}
+
+/// Push clipboard PNG image to a peer.
+pub async fn send_clipboard_image_png(
+    addr: SocketAddr,
+    identity: &DeviceIdentity,
+    width: u32,
+    height: u32,
+    png_bytes: Vec<u8>,
+) -> Result<()> {
+    let (mut stream, mut cipher, _) = connect_secure(addr, identity, Some(8)).await?;
+    let sha256 = hash_bytes(&png_bytes);
+    write_frame_with(
+        &mut stream,
+        &Frame::ClipboardImagePush {
+            sender_id: identity.device_id.clone(),
+            sender_name: identity.device_name.clone(),
+            sha256,
+            width,
+            height,
+            png_bytes,
+        },
+        &mut cipher,
+    )
+    .await?;
+    match read_frame_with(&mut stream, &mut cipher).await? {
         Some(Frame::Error { message }) => Err(LierError::Protocol(message)),
-        _ => Err(LierError::Protocol("Неожиданный ответ на запрос буфера".into())),
+        _ => Ok(()),
     }
 }
 
@@ -870,9 +1272,9 @@ pub async fn send_clipboard_text(
     identity: &DeviceIdentity,
     text: &str,
 ) -> Result<()> {
-    let mut stream = TcpStream::connect(addr).await?;
+    let (mut stream, mut cipher, _) = connect_secure(addr, identity, Some(5)).await?;
     let sha256 = hash_bytes(text.as_bytes());
-    write_frame(
+    write_frame_with(
         &mut stream,
         &Frame::ClipboardPush {
             sender_id: identity.device_id.clone(),
@@ -880,10 +1282,13 @@ pub async fn send_clipboard_text(
             sha256,
             text: text.to_string(),
         },
+        &mut cipher,
     )
     .await?;
-    let _ = read_frame(&mut stream).await?;
-    Ok(())
+    match read_frame_with(&mut stream, &mut cipher).await? {
+        Some(Frame::Error { message }) => Err(LierError::Protocol(message)),
+        _ => Ok(()),
+    }
 }
 
 fn unique_dest_path(dir: &Path, name: &str) -> PathBuf {

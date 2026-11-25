@@ -130,6 +130,21 @@ async fn main() -> Result<()> {
                     CoreEvent::ClipboardReceived { from_peer, preview, .. } => {
                         println!("[Clipboard] From {from_peer}: {preview}");
                     }
+                    CoreEvent::ClipboardImageReceived {
+                        from_peer,
+                        width,
+                        height,
+                        png_bytes,
+                        ..
+                    } => {
+                        println!(
+                            "[ClipboardImage] From {from_peer}: {width}x{height} ({} bytes)",
+                            png_bytes.len()
+                        );
+                    }
+                    CoreEvent::PeerPaired(peer) => {
+                        println!("[Security] Paired with {} ({})", peer.device_name, peer.fingerprint);
+                    }
                     CoreEvent::SyncActivity { folder_id, message } => {
                         println!("[Sync:{folder_id}] {message}");
                     }

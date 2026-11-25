@@ -1,15 +1,17 @@
 // LierSync — Copyright (C) 2026 LaRevole (LaRCorp) — GPL-3.0-only
 
-use jni::objects::{JClass, JString};
-use jni::sys::jstring;
+use jni::objects::{JByteArray, JClass, JString};
+use jni::sys::{jint, jstring};
 use jni::JNIEnv;
 use lier_sync_core::{
-    compare_folder_with_peer, detect_local_ipv4s, fetch_clipboard_from_peer, ping_peer,
-    send_clipboard_text, send_quick_batch, start_p2p_server, sync_folder_by_direction,
-    ClipboardGuard, CoreEvent, DeviceIdentity, DiscoveryService, SharedFolderRegistry,
-    SyncDirection, DEFAULT_P2P_PORT,
+    build_pairing_uri, compare_folder_with_peer, detect_local_ipv4s,
+    fetch_clipboard_payload_from_peer, generate_qr_png, pair_with_peer, parse_pairing_uri,
+    ping_peer, send_clipboard_image_png, send_clipboard_text, send_quick_batch,
+    start_p2p_server_secure, sync_folder_by_direction, ClipboardGuard, CoreEvent, DeviceIdentity,
+    DiscoveryService, RemoteClipboardPayload, SecurityManager, SecurityPolicy,
+    SharedFolderRegistry, SyncDirection, TrustedPeer, DEFAULT_P2P_PORT,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -24,6 +26,7 @@ struct AndroidNodeState {
     discovery: DiscoveryService,
     folders: SharedFolderRegistry,
     clipboard_guard: ClipboardGuard,
+    security: SecurityManager,
     events: Arc<Mutex<Vec<MobileEventDto>>>,
 }
 
@@ -42,9 +45,21 @@ enum MobileEventDto {
         text_preview: String,
         full_text: String,
     },
+    ClipboardImageReceived {
+        from_peer: String,
+        width: u32,
+        height: u32,
+        png_path: String,
+    },
     SyncActivity {
         folder_id: String,
         message: String,
+    },
+    PeerPaired {
+        device_id: String,
+        device_name: String,
+        fingerprint: String,
+        added_at: String,
     },
     Error {
         message: String,
@@ -136,17 +151,19 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_in
     let folders = SharedFolderRegistry::new();
     let clipboard_guard = ClipboardGuard::new(60);
     let discovery = DiscoveryService::new();
+    let security = SecurityManager::new(SecurityPolicy::default());
     let (core_tx, mut core_rx) = mpsc::channel::<CoreEvent>(128);
 
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_P2P_PORT);
     let bound_port = rt.block_on(async {
-        match start_p2p_server(
+        match start_p2p_server_secure(
             bind_addr,
             identity.clone(),
             rx_dir.clone(),
             folders.clone(),
             clipboard_guard.clone(),
             discovery.clone(),
+            security.clone(),
             core_tx.clone(),
         )
         .await
@@ -154,13 +171,14 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_in
             Ok(a) => a.port(),
             Err(_) => {
                 let fallback = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-                start_p2p_server(
+                start_p2p_server_secure(
                     fallback,
                     identity.clone(),
                     rx_dir.clone(),
                     folders.clone(),
                     clipboard_guard.clone(),
                     discovery.clone(),
+                    security.clone(),
                     core_tx,
                 )
                 .await
@@ -177,6 +195,7 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_in
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_sink = Arc::clone(&events);
+    let rx_dir_ev = rx_dir.clone();
     rt.spawn(async move {
         while let Some(ev) = core_rx.recv().await {
             let dto = match ev {
@@ -202,9 +221,38 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_in
                     text_preview: preview,
                     full_text,
                 },
+                CoreEvent::ClipboardImageReceived {
+                    from_peer,
+                    width,
+                    height,
+                    png_bytes,
+                    ..
+                } => {
+                    let fname = format!(
+                        "clip_{}.png",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0)
+                    );
+                    let path = rx_dir_ev.join(fname);
+                    let _ = std::fs::write(&path, &png_bytes);
+                    MobileEventDto::ClipboardImageReceived {
+                        from_peer,
+                        width,
+                        height,
+                        png_path: path.display().to_string(),
+                    }
+                }
                 CoreEvent::SyncActivity { folder_id, message } => {
                     MobileEventDto::SyncActivity { folder_id, message }
                 }
+                CoreEvent::PeerPaired(peer) => MobileEventDto::PeerPaired {
+                    device_id: peer.device_id,
+                    device_name: peer.device_name,
+                    fingerprint: peer.fingerprint,
+                    added_at: peer.added_at,
+                },
                 CoreEvent::Error(message) => MobileEventDto::Error { message },
             };
             if let Ok(mut list) = events_sink.lock() {
@@ -231,6 +279,7 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_in
         discovery,
         folders,
         clipboard_guard,
+        security,
         events,
     }));
 
@@ -443,6 +492,49 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pu
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pushClipboardImageBytes(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    target_addr: JString<'_>,
+    width: jint,
+    height: jint,
+    png_bytes: JByteArray<'_>,
+    force: jni::sys::jboolean,
+) -> jstring {
+    let addr_str = jstr(&mut env, &target_addr);
+    let Ok(addr) = addr_str.trim().parse::<SocketAddr>() else {
+        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Invalid address\"}");
+    };
+    let Ok(bytes) = env.convert_byte_array(&png_bytes) else {
+        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Invalid image bytes\"}");
+    };
+    let Some(state) = NODE.get() else {
+        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Node not initialized\"}");
+    };
+    let w = width.max(0) as u32;
+    let h = height.max(0) as u32;
+    let hash = match state.clipboard_guard.should_emit_local_image(&bytes) {
+        Some(h) => h,
+        None if force != 0 => lier_sync_core::hash_bytes(&bytes),
+        None => return ret_jstr(&mut env, "{\"ok\":true,\"skipped\":\"anti_echo\"}"),
+    };
+    state
+        .clipboard_guard
+        .record_sent_image(&addr.to_string(), w, h, &bytes, &hash);
+    let id = state.identity.clone();
+    match state
+        .rt
+        .block_on(send_clipboard_image_png(addr, &id, w, h, bytes))
+    {
+        Ok(()) => ret_jstr(&mut env, "{\"ok\":true}"),
+        Err(e) => ret_jstr(
+            &mut env,
+            &serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+        ),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pullClipboardJson(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -452,19 +544,23 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pu
     let Ok(addr) = addr_str.trim().parse::<SocketAddr>() else {
         return ret_jstr(
             &mut env,
-            "{\"ok\":false,\"error\":\"Некорректный адрес получателя\"}",
+            "{\"ok\":false,\"error\":\"Invalid peer address\"}",
         );
     };
     let Some(state) = NODE.get() else {
-        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Узел не запущен\"}");
+        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Node not running\"}");
     };
     let id = state.identity.clone();
-    match state.rt.block_on(fetch_clipboard_from_peer(addr, &id)) {
-        Ok((sender_name, sha256, text)) => {
+    match state.rt.block_on(fetch_clipboard_payload_from_peer(addr, &id)) {
+        Ok(RemoteClipboardPayload::Text {
+            sender_name,
+            sha256,
+            text,
+        }) => {
             if text.is_empty() {
                 return ret_jstr(
                     &mut env,
-                    "{\"ok\":false,\"error\":\"Буфер обмена на удалённом устройстве пуст\"}",
+                    "{\"ok\":false,\"error\":\"Remote clipboard is empty\"}",
                 );
             }
             let _ = state.clipboard_guard.accept_remote(&sender_name, &text, &sha256);
@@ -472,8 +568,46 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pu
                 &mut env,
                 &serde_json::json!({
                     "ok": true,
+                    "kind": "text",
                     "sender_name": sender_name,
                     "text": text
+                })
+                .to_string(),
+            )
+        }
+        Ok(RemoteClipboardPayload::Image {
+            sender_name,
+            sha256,
+            width,
+            height,
+            png_bytes,
+        }) => {
+            let _ = state
+                .clipboard_guard
+                .accept_remote_image(&sender_name, width, height, &png_bytes, &sha256);
+            let fname = format!(
+                "clip_pull_{}.png",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
+            let path = state.receive_dir.join(fname);
+            if let Err(e) = std::fs::write(&path, &png_bytes) {
+                return ret_jstr(
+                    &mut env,
+                    &serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+                );
+            }
+            ret_jstr(
+                &mut env,
+                &serde_json::json!({
+                    "ok": true,
+                    "kind": "image",
+                    "sender_name": sender_name,
+                    "width": width,
+                    "height": height,
+                    "png_path": path.display().to_string()
                 })
                 .to_string(),
             )
@@ -538,4 +672,141 @@ pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_ge
         })
         .collect();
     ret_jstr(&mut env, &serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()))
+}
+
+#[derive(Deserialize)]
+struct SecurityConfigInput {
+    encrypt_transport: Option<bool>,
+    whitelist_only: Option<bool>,
+    pairing_pin: Option<String>,
+    trusted_peers: Option<Vec<TrustedPeer>>,
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_setSecurityConfigJson(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    config_json: JString<'_>,
+) -> jstring {
+    let raw = jstr(&mut env, &config_json);
+    let Some(state) = NODE.get() else {
+        return ret_jstr(&mut env, "{\"ok\":false}");
+    };
+    if let Ok(cfg) = serde_json::from_str::<SecurityConfigInput>(&raw) {
+        if let Some(enc) = cfg.encrypt_transport {
+            state.security.set_encrypt_transport(enc);
+        }
+        if let Some(wl) = cfg.whitelist_only {
+            state.security.set_whitelist_only(wl);
+        }
+        if let Some(pin) = cfg.pairing_pin.filter(|s| !s.trim().is_empty()) {
+            state.security.set_pin(&pin);
+        }
+        if let Some(list) = cfg.trusted_peers {
+            state.security.set_trusted_peers(list);
+        }
+    }
+    let snap = state.security.snapshot();
+    ret_jstr(
+        &mut env,
+        &serde_json::json!({
+            "ok": true,
+            "encrypt_transport": snap.encrypt_transport,
+            "whitelist_only": snap.whitelist_only,
+            "pairing_pin": snap.pairing_pin,
+            "trusted_peers": snap.trusted_peers,
+        })
+        .to_string(),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_pairWithPeerJson(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    target_addr: JString<'_>,
+    pin: JString<'_>,
+) -> jstring {
+    let addr_str = jstr(&mut env, &target_addr);
+    let pin_str = jstr(&mut env, &pin);
+    let Ok(addr) = addr_str.trim().parse::<SocketAddr>() else {
+        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Invalid ip:port\"}");
+    };
+    let Some(state) = NODE.get() else {
+        return ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Node not running\"}");
+    };
+    let id = state.identity.clone();
+    match state.rt.block_on(pair_with_peer(addr, &id, &pin_str)) {
+        Ok(peer) => {
+            state
+                .security
+                .add_or_update_trusted(&peer.device_id, &peer.device_name, &peer.fingerprint);
+            ret_jstr(
+                &mut env,
+                &serde_json::json!({
+                    "ok": true,
+                    "device_id": peer.device_id,
+                    "device_name": peer.device_name,
+                    "fingerprint": peer.fingerprint,
+                    "added_at": peer.added_at,
+                })
+                .to_string(),
+            )
+        }
+        Err(e) => ret_jstr(
+            &mut env,
+            &serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+        ),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_generatePairingQrPng(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    addr_str: JString<'_>,
+    pin_str: JString<'_>,
+    size_px: jint,
+) -> jni::sys::jbyteArray {
+    let addr = jstr(&mut env, &addr_str);
+    let pin = jstr(&mut env, &pin_str);
+    let (id_str, name_str, fp_str) = NODE
+        .get()
+        .map(|s| {
+            (
+                s.identity.device_id.clone(),
+                s.identity.device_name.clone(),
+                s.identity.fingerprint.clone(),
+            )
+        })
+        .unwrap_or_default();
+    let uri = build_pairing_uri(&addr, &id_str, &name_str, &fp_str, &pin);
+    let png = generate_qr_png(&uri, size_px.max(128) as u32).unwrap_or_default();
+    env.byte_array_from_slice(&png)
+        .map(|a| a.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_larevole_liersync_nativebridge_LierSyncNative_parsePairingUriJson(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    raw_uri: JString<'_>,
+) -> jstring {
+    let raw = jstr(&mut env, &raw_uri);
+    match parse_pairing_uri(&raw) {
+        Some(p) => ret_jstr(
+            &mut env,
+            &serde_json::json!({
+                "ok": true,
+                "addr": p.addr,
+                "device_id": p.device_id,
+                "device_name": p.device_name,
+                "fingerprint": p.fingerprint,
+                "pin": p.pin
+            })
+            .to_string(),
+        ),
+        None => ret_jstr(&mut env, "{\"ok\":false,\"error\":\"Invalid LierSync QR code\"}"),
+    }
 }

@@ -16,13 +16,18 @@ use iced::{
     Task, Theme,
 };
 use lier_sync_core::{
-    compare_folder_with_peer, detect_local_ipv4s, fetch_clipboard_from_peer, get_clipboard_text,
-    ping_peer, probe_channels_for_lang, select_active_medium, send_clipboard_text, send_quick_batch,
-    set_clipboard_text, spawn_folder_watcher, start_p2p_server, sync_folder_by_direction,
-    AppConfig, AppLanguage, ChannelDescriptor, ChannelPolicy, ClipboardDirection, ClipboardGuard,
-    CoreEvent, DeviceIdentity, DiscoveryService, PeerInfo, SharedFolderConfig,
-    SharedFolderRegistry, SyncDirection, SyncPreview, TransferDirection, TransferRecord,
-    DEFAULT_P2P_PORT,
+    build_pairing_uri, compare_folder_with_peer, detect_local_ipv4s,
+    fetch_clipboard_payload_from_peer, generate_qr_png, get_clipboard_image_png,
+    get_clipboard_text, list_paired_bluetooth_devices, pair_with_peer, ping_peer,
+    probe_channels_for_lang, select_active_medium, send_bluetooth_clipboard_image,
+    send_bluetooth_clipboard_text, send_bluetooth_quick_batch, send_clipboard_image_png,
+    send_clipboard_text, send_quick_batch, set_clipboard_image_png, set_clipboard_text,
+    spawn_folder_watcher, start_bluetooth_server, start_p2p_server_secure,
+    sync_folder_by_direction, AppConfig, AppLanguage, BluetoothPeerInfo, ChannelDescriptor,
+    ChannelPolicy, ClipboardDirection, ClipboardGuard, CoreEvent, DeviceIdentity, DiscoveryService,
+    FolderChangeEvent, PeerInfo, RemoteClipboardPayload, SecurityManager, SecurityPolicy,
+    SharedFolderConfig, SharedFolderRegistry, SyncDirection, SyncPreview, TransferDirection,
+    TransferRecord, DEFAULT_P2P_PORT,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -119,8 +124,10 @@ enum UiUpdate {
     SentFilesRecorded(Vec<TransferRecord>),
     Log(String),
     FolderStatus(String, String),
+    FolderChanged(FolderChangeEvent),
     FolderPreview(String, SyncPreview),
     PingResult(String),
+    PairFinished(String),
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +177,21 @@ enum Message {
     SelectChannelPolicy(ChannelPolicy),
     RelayEndpointChanged(String),
     SelectLanguage(AppLanguage),
+
+    // Security & Pairing
+    ToggleEncryptTransport(bool),
+    ToggleWhitelistOnly(bool),
+    RotatePairingPin,
+    PairPinInputChanged(String),
+    PairTargetPeer,
+    RemoveTrustedPeer(String),
+
+    // Bluetooth & System Share
+    RefreshBtDevices,
+    SelectBtDevice(String),
+    SendClipboardBluetooth,
+    SendQueueBluetooth,
+    InstallSendToShortcut,
 }
 
 struct LierSyncApp {
@@ -177,8 +199,14 @@ struct LierSyncApp {
     main_window: Option<window::Id>,
     tray: Option<TrayState>,
     logo_handle: iced_image::Handle,
+    qr_handle: iced_image::Handle,
     language: AppLanguage,
     identity: DeviceIdentity,
+    security: SecurityManager,
+    pair_pin_input: String,
+    pair_status: String,
+    bt_devices: Vec<BluetoothPeerInfo>,
+    selected_bt_mac: String,
     p2p_port: u16,
     local_addr_label: String,
     receive_dir: PathBuf,
@@ -229,19 +257,30 @@ impl LierSyncApp {
         let folder_registry = SharedFolderRegistry::new();
         let clipboard_guard = ClipboardGuard::new(50);
 
+        let saved_cfg = AppConfig::load_from(&AppConfig::default_path());
+        let lang = saved_cfg.language;
+        let need_pin_save = saved_cfg.pairing_pin.trim().is_empty();
+        let security = SecurityManager::new(SecurityPolicy {
+            encrypt_transport: saved_cfg.encrypt_transport,
+            whitelist_only: saved_cfg.whitelist_only,
+            pairing_pin: saved_cfg.pairing_pin.clone(),
+            trusted_peers: saved_cfg.trusted_peers.clone(),
+        });
+
         let (core_tx, core_rx) = mpsc::channel::<CoreEvent>(128);
         let (ui_tx, ui_rx) = mpsc::channel::<UiUpdate>(128);
 
         let discovery = DiscoveryService::new();
         let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_P2P_PORT);
         let bound_port = rt.block_on(async {
-            match start_p2p_server(
+            match start_p2p_server_secure(
                 bind_addr,
                 identity.clone(),
                 receive_dir.clone(),
                 folder_registry.clone(),
                 clipboard_guard.clone(),
                 discovery.clone(),
+                security.clone(),
                 core_tx.clone(),
             )
             .await
@@ -249,13 +288,14 @@ impl LierSyncApp {
                 Ok(addr) => addr.port(),
                 Err(_) => {
                     let fallback = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-                    start_p2p_server(
+                    start_p2p_server_secure(
                         fallback,
                         identity.clone(),
                         receive_dir.clone(),
                         folder_registry.clone(),
                         clipboard_guard.clone(),
                         discovery.clone(),
+                        security.clone(),
                         core_tx.clone(),
                     )
                     .await
@@ -275,6 +315,15 @@ impl LierSyncApp {
             let _guard = rt.enter();
             let _ = discovery.start(identity.clone(), bound_port);
         }
+        let _ = start_bluetooth_server(
+            identity.clone(),
+            receive_dir.clone(),
+            clipboard_guard.clone(),
+            security.clone(),
+            core_tx.clone(),
+        );
+        let bt_devices = list_paired_bluetooth_devices();
+        let selected_bt_mac = bt_devices.first().map(|d| d.mac.clone()).unwrap_or_default();
 
         let ui_tx_peers = ui_tx.clone();
         let disc_poll = discovery.clone();
@@ -285,9 +334,6 @@ impl LierSyncApp {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         });
-
-        let saved_cfg = AppConfig::load_from(&AppConfig::default_path());
-        let lang = saved_cfg.language;
 
         let auto_clipboard_flag = Arc::new(AtomicBool::new(saved_cfg.auto_clipboard));
         let clipboard_targets: Arc<Mutex<Vec<SocketAddr>>> = Arc::new(Mutex::new(Vec::new()));
@@ -303,22 +349,31 @@ impl LierSyncApp {
                     if !flag.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let Ok(text) = get_clipboard_text() else {
-                        continue;
-                    };
-                    let Some(hash) = guard.should_emit_local(&text) else {
-                        continue;
-                    };
                     let addrs = targets.lock().map(|g| g.clone()).unwrap_or_default();
                     if addrs.is_empty() {
                         continue;
                     }
-                    for addr in addrs {
-                        guard.record_sent(&addr.to_string(), &text, &hash);
-                        if let Err(e) = send_clipboard_text(addr, &id, &text).await {
-                            let _ = ui_tx_cb
-                                .send(UiUpdate::Log(format!("Ошибка автобуфера ({addr}): {e}")))
-                                .await;
+                    if let Ok(text) = get_clipboard_text() {
+                        if let Some(hash) = guard.should_emit_local(&text) {
+                            for addr in addrs {
+                                guard.record_sent(&addr.to_string(), &text, &hash);
+                                if let Err(e) = send_clipboard_text(addr, &id, &text).await {
+                                    let _ = ui_tx_cb
+                                        .send(UiUpdate::Log(format!("Ошибка автобуфера ({addr}): {e}")))
+                                        .await;
+                                }
+                            }
+                        }
+                    } else if let Ok((w, h, png)) = get_clipboard_image_png() {
+                        if let Some(hash) = guard.should_emit_local_image(&png) {
+                            for addr in addrs {
+                                guard.record_sent_image(&addr.to_string(), w, h, &png, &hash);
+                                if let Err(e) = send_clipboard_image_png(addr, &id, w, h, png.clone()).await {
+                                    let _ = ui_tx_cb
+                                        .send(UiUpdate::Log(format!("Ошибка автобуфера ({addr}): {e}")))
+                                        .await;
+                                }
+                            }
                         }
                     }
                 }
@@ -345,14 +400,36 @@ impl LierSyncApp {
         let (win_id, open_task) = window::open(main_window_settings());
         let tray = create_tray_icon(lang);
         let logo_handle = iced_image::Handle::from_bytes(LOGO_PNG);
+        let initial_uri = build_pairing_uri(
+            &local_addr_label,
+            &identity.device_id,
+            &identity.device_name,
+            &identity.fingerprint,
+            &security.pairing_pin(),
+        );
+        let qr_png = generate_qr_png(&initial_uri, 200).unwrap_or_default();
+        let qr_handle = iced_image::Handle::from_bytes(qr_png);
+
+        let cli_send_queue: Vec<PathBuf> = std::env::args()
+            .skip(1)
+            .filter(|a| a != "--send")
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .collect();
 
         let mut app = Self {
             rt,
             main_window: Some(win_id),
             tray,
             logo_handle,
+            qr_handle,
             language: lang,
             identity,
+            security,
+            pair_pin_input: String::new(),
+            pair_status: String::new(),
+            bt_devices,
+            selected_bt_mac,
             p2p_port: bound_port,
             local_addr_label: local_addr_label.clone(),
             receive_dir,
@@ -361,7 +438,7 @@ impl LierSyncApp {
             selected_peer_idx: None,
             manual_addr: default_manual.clone(),
             ping_status: tr(lang, "Не проверялось", "Not checked").to_string(),
-            send_queue: Vec::new(),
+            send_queue: cli_send_queue,
             transfer_history: saved_cfg.transfer_history,
             send_progress: 0.0,
             send_status: tr(
@@ -397,6 +474,9 @@ impl LierSyncApp {
             app.mount_shared_folder(f.id, dir, f.remote_addr, f.auto_sync, f.direction, false);
         }
         app.sync_clipboard_targets();
+        if need_pin_save {
+            app.save_config();
+        }
 
         (app, open_task.discard())
     }
@@ -466,6 +546,7 @@ impl LierSyncApp {
     }
 
     fn save_config(&self) {
+        let sec = self.security.snapshot();
         let cfg = AppConfig {
             manual_addr: self.manual_addr.clone(),
             auto_clipboard: self.auto_clipboard,
@@ -484,6 +565,10 @@ impl LierSyncApp {
                 .collect(),
             transfer_history: self.transfer_history.iter().take(60).cloned().collect(),
             language: self.language,
+            encrypt_transport: sec.encrypt_transport,
+            whitelist_only: sec.whitelist_only,
+            pairing_pin: sec.pairing_pin,
+            trusted_peers: sec.trusted_peers,
         };
         let _ = cfg.save_to(&AppConfig::default_path());
     }
@@ -521,13 +606,8 @@ impl LierSyncApp {
         let dir_clone = dir.clone();
         self.rt.spawn(async move {
             while let Some(ev) = watch_rx.recv().await {
-                let _ = ui_tx
-                    .send(UiUpdate::Log(format!(
-                        "Изменение в папке '{}' ({})",
-                        ev.folder_id,
-                        ev.path.display()
-                    )))
-                    .await;
+                let fid_ev = ev.folder_id.clone();
+                let _ = ui_tx.send(UiUpdate::FolderChanged(ev)).await;
                 if auto_clone.load(Ordering::Relaxed) {
                     if let Ok(addr) = remote_str.trim().parse::<SocketAddr>() {
                         let d_mode = *dir_flag_clone.lock().unwrap();
@@ -543,7 +623,7 @@ impl LierSyncApp {
                             if chunks > 0 {
                                 let _ = ui_tx
                                     .send(UiUpdate::FolderStatus(
-                                        fid_clone.clone(),
+                                        fid_ev,
                                         format!("Авто-синхр. ({chunks} бл.)"),
                                     ))
                                     .await;
@@ -626,8 +706,29 @@ impl LierSyncApp {
                         tr(self.language, "Буфер от", "Clipboard from")
                     ));
                 }
+                CoreEvent::ClipboardImageReceived {
+                    from_peer,
+                    width,
+                    height,
+                    ..
+                } => {
+                    self.push_log(format!(
+                        "{} {from_peer}: [{} {width}x{height}]",
+                        tr(self.language, "Картинка в буфере от", "Clipboard image from"),
+                        tr(self.language, "Изображение", "Image")
+                    ));
+                }
                 CoreEvent::SyncActivity { folder_id, message } => {
                     self.push_log(format!("[{folder_id}] {message}"));
+                }
+                CoreEvent::PeerPaired(peer) => {
+                    self.save_config();
+                    self.push_log(format!(
+                        "{}: {} ({})",
+                        tr(self.language, "Сопряжено устройство", "Device paired"),
+                        peer.device_name,
+                        peer.fingerprint
+                    ));
                 }
                 CoreEvent::Error(e) => {
                     self.push_log(format!("{}: {e}", tr(self.language, "Ошибка", "Error")));
@@ -672,6 +773,20 @@ impl LierSyncApp {
                         f.status = status;
                     }
                 }
+                UiUpdate::FolderChanged(ev) => {
+                    let summary = ev.format_alert(self.language);
+                    if let Some(f) = self.shared_folders.iter_mut().find(|f| f.id == ev.folder_id) {
+                        f.status = format!(
+                            "{}: {summary}",
+                            tr(self.language, "Изменено", "Changed")
+                        );
+                    }
+                    self.push_log(format!(
+                        "[{}] {}: {summary}",
+                        ev.folder_id,
+                        tr(self.language, "Обнаружены изменения", "Folder changes detected")
+                    ));
+                }
                 UiUpdate::FolderPreview(id, preview) => {
                     if let Some(f) = self.shared_folders.iter_mut().find(|f| f.id == id) {
                         f.last_preview = Some(preview);
@@ -680,6 +795,11 @@ impl LierSyncApp {
                 UiUpdate::PingResult(msg) => {
                     self.ping_status = msg.clone();
                     self.push_log(msg);
+                }
+                UiUpdate::PairFinished(msg) => {
+                    self.pair_status = msg.clone();
+                    self.push_log(msg);
+                    self.save_config();
                 }
             }
         }
@@ -1109,40 +1229,60 @@ impl LierSyncApp {
             }
             Message::SendClipboardNow => {
                 let l = self.language;
-                match get_clipboard_text() {
-                    Ok(text) => {
-                        if let Some(addr) = self.target_addr() {
-                            let id = self.identity.clone();
-                            let guard = self.clipboard_guard.clone();
-                            let ui_tx = self.ui_tx.clone();
-                            let hash = lier_sync_core::hash_bytes(text.as_bytes());
-                            guard.record_sent(&addr.to_string(), &text, &hash);
-                            self.rt.spawn(async move {
-                                if let Err(e) = send_clipboard_text(addr, &id, &text).await {
-                                    let _ = ui_tx
-                                        .send(UiUpdate::Log(format!(
-                                            "{}: {e}",
-                                            tr(l, "Ошибка отправки буфера", "Clipboard send error")
-                                        )))
-                                        .await;
-                                }
-                            });
-                            self.push_log(format!(
-                                "{} -> {addr}",
-                                tr(l, "Буфер отправлен", "Clipboard sent")
-                            ));
-                        } else {
-                            self.push_log(tr(
-                                l,
-                                "Укажите получателя во вкладке «Отправка»",
-                                "Select a recipient in Quick Send tab",
-                            ));
-                        }
+                if let Some(addr) = self.target_addr() {
+                    if let Some(text) = get_clipboard_text().ok().filter(|t| !t.is_empty()) {
+                        let id = self.identity.clone();
+                        let guard = self.clipboard_guard.clone();
+                        let ui_tx = self.ui_tx.clone();
+                        let hash = lier_sync_core::hash_bytes(text.as_bytes());
+                        guard.record_sent(&addr.to_string(), &text, &hash);
+                        self.rt.spawn(async move {
+                            if let Err(e) = send_clipboard_text(addr, &id, &text).await {
+                                let _ = ui_tx
+                                    .send(UiUpdate::Log(format!(
+                                        "{}: {e}",
+                                        tr(l, "Ошибка отправки буфера", "Clipboard send error")
+                                    )))
+                                    .await;
+                            }
+                        });
+                        self.push_log(format!(
+                            "{} -> {addr}",
+                            tr(l, "Буфер отправлен", "Clipboard sent")
+                        ));
+                    } else if let Ok((w, h, png)) = get_clipboard_image_png() {
+                        let id = self.identity.clone();
+                        let guard = self.clipboard_guard.clone();
+                        let ui_tx = self.ui_tx.clone();
+                        let hash = lier_sync_core::hash_bytes(&png);
+                        guard.record_sent_image(&addr.to_string(), w, h, &png, &hash);
+                        self.rt.spawn(async move {
+                            if let Err(e) = send_clipboard_image_png(addr, &id, w, h, png).await {
+                                let _ = ui_tx
+                                    .send(UiUpdate::Log(format!(
+                                        "{}: {e}",
+                                        tr(l, "Ошибка отправки картинки", "Image send error")
+                                    )))
+                                    .await;
+                            }
+                        });
+                        self.push_log(format!(
+                            "{} ({w}x{h}) -> {addr}",
+                            tr(l, "Картинка буфера отправлена", "Clipboard image sent")
+                        ));
+                    } else {
+                        self.push_log(tr(
+                            l,
+                            "Буфер обмена пуст (нет текста и картинки)",
+                            "Clipboard is empty (no text or image)",
+                        ));
                     }
-                    Err(e) => self.push_log(format!(
-                        "{}: {e}",
-                        tr(l, "Не удалось прочитать буфер", "Failed to read clipboard")
-                    )),
+                } else {
+                    self.push_log(tr(
+                        l,
+                        "Укажите получателя во вкладке «Отправка»",
+                        "Select a recipient in Quick Send tab",
+                    ));
                 }
                 Task::none()
             }
@@ -1153,8 +1293,12 @@ impl LierSyncApp {
                     let guard = self.clipboard_guard.clone();
                     let ui_tx = self.ui_tx.clone();
                     self.rt.spawn(async move {
-                        match fetch_clipboard_from_peer(addr, &id).await {
-                            Ok((sender_name, sha256, text)) => {
+                        match fetch_clipboard_payload_from_peer(addr, &id).await {
+                            Ok(RemoteClipboardPayload::Text {
+                                sender_name,
+                                sha256,
+                                text,
+                            }) => {
                                 if text.is_empty() {
                                     let _ = ui_tx
                                         .send(UiUpdate::Log(
@@ -1173,6 +1317,29 @@ impl LierSyncApp {
                                         .send(UiUpdate::Log(format!(
                                             "{} {sender_name}: {preview}",
                                             tr(l, "Получен буфер от", "Clipboard pulled from")
+                                        )))
+                                        .await;
+                                }
+                            }
+                            Ok(RemoteClipboardPayload::Image {
+                                sender_name,
+                                sha256,
+                                width,
+                                height,
+                                png_bytes,
+                            }) => {
+                                if guard.accept_remote_image(
+                                    &sender_name,
+                                    width,
+                                    height,
+                                    &png_bytes,
+                                    &sha256,
+                                ) {
+                                    let _ = set_clipboard_image_png(&png_bytes);
+                                    let _ = ui_tx
+                                        .send(UiUpdate::Log(format!(
+                                            "{} {sender_name}: [{width}x{height}]",
+                                            tr(l, "Получена картинка в буфер от", "Pulled clipboard image from")
                                         )))
                                         .await;
                                 }
@@ -1244,6 +1411,209 @@ impl LierSyncApp {
                 self.push_log(tr(lang, "Язык: Русский", "Language: English"));
                 Task::none()
             }
+            Message::ToggleEncryptTransport(enabled) => {
+                self.security.set_encrypt_transport(enabled);
+                self.save_config();
+                self.push_log(if enabled {
+                    tr(
+                        self.language,
+                        "Шифрование X25519 + ChaCha20 включено",
+                        "X25519 + ChaCha20 encryption enabled",
+                    )
+                } else {
+                    tr(
+                        self.language,
+                        "Шифрование выключено",
+                        "Transport encryption disabled",
+                    )
+                });
+                Task::none()
+            }
+            Message::ToggleWhitelistOnly(enabled) => {
+                self.security.set_whitelist_only(enabled);
+                self.save_config();
+                self.push_log(if enabled {
+                    tr(
+                        self.language,
+                        "Включён белый список доверенных устройств",
+                        "Trusted whitelist mode enabled",
+                    )
+                } else {
+                    tr(
+                        self.language,
+                        "Белый список отключён",
+                        "Trusted whitelist mode disabled",
+                    )
+                });
+                Task::none()
+            }
+            Message::RotatePairingPin => {
+                let pin = self.security.rotate_pin();
+                let uri = build_pairing_uri(
+                    &self.local_addr_label,
+                    &self.identity.device_id,
+                    &self.identity.device_name,
+                    &self.identity.fingerprint,
+                    &pin,
+                );
+                if let Ok(png) = generate_qr_png(&uri, 200) {
+                    self.qr_handle = iced_image::Handle::from_bytes(png);
+                }
+                self.save_config();
+                self.push_log(format!(
+                    "{}: {pin}",
+                    tr(self.language, "Обновлён PIN сопряжения", "New pairing PIN")
+                ));
+                Task::none()
+            }
+            Message::PairPinInputChanged(v) => {
+                self.pair_pin_input = v.chars().filter(|c| c.is_ascii_digit()).take(8).collect();
+                Task::none()
+            }
+            Message::PairTargetPeer => {
+                let l = self.language;
+                if let Some(addr) = self.target_addr() {
+                    let pin = self.pair_pin_input.trim().to_string();
+                    if pin.is_empty() {
+                        self.pair_status = tr(l, "Введите PIN другого устройства", "Enter peer PIN").into();
+                        return Task::none();
+                    }
+                    self.pair_status = tr(l, "Сопряжение...", "Pairing...").into();
+                    let id = self.identity.clone();
+                    let sec = self.security.clone();
+                    let ui_tx = self.ui_tx.clone();
+                    self.rt.spawn(async move {
+                        let msg = match pair_with_peer(addr, &id, &pin).await {
+                            Ok(peer) => {
+                                sec.add_or_update_trusted(
+                                    &peer.device_id,
+                                    &peer.device_name,
+                                    &peer.fingerprint,
+                                );
+                                format!(
+                                    "{}: {} ({})",
+                                    tr(l, "Сопряжено", "Paired"),
+                                    peer.device_name,
+                                    peer.fingerprint
+                                )
+                            }
+                            Err(e) => format!("{}: {e}", tr(l, "Ошибка сопряжения", "Pairing error")),
+                        };
+                        let _ = ui_tx.send(UiUpdate::PairFinished(msg)).await;
+                    });
+                } else {
+                    self.pair_status = tr(l, "Укажите IP:порт пира", "Enter peer IP:port").into();
+                }
+                Task::none()
+            }
+            Message::RemoveTrustedPeer(id_or_fp) => {
+                if self.security.remove_trusted(&id_or_fp) {
+                    self.save_config();
+                    self.push_log(tr(
+                        self.language,
+                        "Устройство удалено из белого списка",
+                        "Removed device from whitelist",
+                    ));
+                }
+                Task::none()
+            }
+            Message::RefreshBtDevices => {
+                self.bt_devices = list_paired_bluetooth_devices();
+                if self.selected_bt_mac.is_empty() {
+                    if let Some(first) = self.bt_devices.first() {
+                        self.selected_bt_mac = first.mac.clone();
+                    }
+                }
+                self.channels = probe_channels_for_lang(
+                    self.p2p_port,
+                    Some(&self.relay_endpoint),
+                    self.language,
+                );
+                Task::none()
+            }
+            Message::SelectBtDevice(mac) => {
+                self.selected_bt_mac = mac;
+                Task::none()
+            }
+            Message::SendClipboardBluetooth => {
+                let l = self.language;
+                if self.selected_bt_mac.is_empty() {
+                    self.push_log(tr(l, "Выберите Bluetooth-устройство", "Select a Bluetooth device"));
+                    return Task::none();
+                }
+                let mac = self.selected_bt_mac.clone();
+                let id = self.identity.clone();
+                let ui_tx = self.ui_tx.clone();
+                if let Some(text) = get_clipboard_text().ok().filter(|t| !t.is_empty()) {
+                    let guard = self.clipboard_guard.clone();
+                    let hash = lier_sync_core::hash_bytes(text.as_bytes());
+                    guard.record_sent(&format!("BT {mac}"), &text, &hash);
+                    self.rt.spawn(async move {
+                        let msg = match send_bluetooth_clipboard_text(mac, id, text).await {
+                            Ok(()) => format!("{}: BT", tr(l, "Буфер отправлен через", "Clipboard sent via")),
+                            Err(e) => format!("{}: {e}", tr(l, "Ошибка Bluetooth", "Bluetooth error")),
+                        };
+                        let _ = ui_tx.send(UiUpdate::Log(msg)).await;
+                    });
+                } else if let Ok((w, h, png)) = get_clipboard_image_png() {
+                    let guard = self.clipboard_guard.clone();
+                    let hash = lier_sync_core::hash_bytes(&png);
+                    guard.record_sent_image(&format!("BT {mac}"), w, h, &png, &hash);
+                    self.rt.spawn(async move {
+                        let msg = match send_bluetooth_clipboard_image(mac, id, w, h, png).await {
+                            Ok(()) => format!("{}: BT ({w}x{h})", tr(l, "Картинка отправлена через", "Image sent via")),
+                            Err(e) => format!("{}: {e}", tr(l, "Ошибка Bluetooth", "Bluetooth error")),
+                        };
+                        let _ = ui_tx.send(UiUpdate::Log(msg)).await;
+                    });
+                } else {
+                    self.push_log(tr(l, "Буфер обмена пуст", "Clipboard is empty"));
+                }
+                Task::none()
+            }
+            Message::SendQueueBluetooth => {
+                let l = self.language;
+                if self.selected_bt_mac.is_empty() || self.send_queue.is_empty() {
+                    self.push_log(tr(
+                        l,
+                        "Выберите Bluetooth-устройство и добавьте файлы в очередь",
+                        "Select a Bluetooth device and queue files first",
+                    ));
+                    return Task::none();
+                }
+                let mac = self.selected_bt_mac.clone();
+                let id = self.identity.clone();
+                let paths = self.send_queue.clone();
+                let ui_tx = self.ui_tx.clone();
+                self.push_log(tr(l, "Отправка файлов по Bluetooth...", "Sending files via Bluetooth..."));
+                self.rt.spawn(async move {
+                    let msg = match send_bluetooth_quick_batch(mac, id, paths).await {
+                        Ok(n) => format!("{}: {n}", tr(l, "Отправлено файлов по Bluetooth", "Sent files via Bluetooth")),
+                        Err(e) => format!("{}: {e}", tr(l, "Ошибка Bluetooth", "Bluetooth error")),
+                    };
+                    let _ = ui_tx.send(UiUpdate::Log(msg)).await;
+                });
+                Task::none()
+            }
+            Message::InstallSendToShortcut => {
+                let l = self.language;
+                match install_windows_sendto() {
+                    Ok(path) => {
+                        self.push_log(format!(
+                            "{}: {}",
+                            tr(l, "Ярлык SendTo создан", "SendTo shortcut created"),
+                            path.display()
+                        ));
+                    }
+                    Err(e) => {
+                        self.push_log(format!(
+                            "{}: {e}",
+                            tr(l, "Ошибка создания ярлыка SendTo", "SendTo shortcut error")
+                        ));
+                    }
+                }
+                Task::none()
+            }
         }
     }
 
@@ -1257,7 +1627,7 @@ impl LierSyncApp {
             .width(28)
             .height(28);
 
-        let version_badge = container(text("v0.1.0").size(11).color(ACCENT_TEAL))
+        let version_badge = container(text("v1.1").size(11).color(ACCENT_TEAL))
             .padding([3, 8])
             .style(|_| container::Style {
                 background: Some(Background::Color(BG_ELEVATED)),
@@ -1798,50 +2168,61 @@ impl LierSyncApp {
     fn view_channels(&self) -> Element<'_, Message> {
         let l = self.language;
         let policy_opts = policy_choices(l);
+        let sec_pin = self.security.pairing_pin();
         let my_info_card = container(
-            column![
-                text(tr(l, "Подключение и проверка связи", "Connection & Diagnostics")).size(15),
-                row![
-                    text(format!("{}: {}", tr(l, "Мой адрес", "My address"), self.local_addr_label))
-                        .size(13)
-                        .color(ACCENT_TEAL),
-                    button(
-                        row![icon(ICON_COPY, 14.0), text(tr(l, "Копировать", "Copy")).size(12)]
-                            .spacing(5)
-                            .align_y(Alignment::Center)
-                    )
-                    .on_press(Message::CopyMyAddress)
-                    .style(secondary_btn_style),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-                text(format!(
-                    "{}: adb reverse tcp:{} tcp:{} -> 127.0.0.1:{}",
-                    tr(l, "По USB-кабелю (ADB)", "Via USB cable (ADB)"),
-                    self.p2p_port,
-                    self.p2p_port,
-                    self.p2p_port
-                ))
-                .size(12)
-                .color(TEXT_MUTED),
-                row![
-                    text(tr(l, "Проверить пир:", "Ping peer:")).size(13).color(TEXT_MUTED),
-                    text_input("192.168.43.1:47789", &self.manual_addr)
-                        .on_input(Message::ManualAddrChanged)
-                        .width(200),
-                    button(
-                        row![icon(ICON_SEARCH, 14.0), text(tr(l, "Проверить связь", "Ping peer")).size(12)]
-                            .spacing(5)
-                            .align_y(Alignment::Center)
-                    )
-                    .on_press(Message::PingTarget)
-                    .style(teal_btn_style),
-                    text(&self.ping_status).size(12).color(TEXT_MUTED),
+            row![
+                column![
+                    text(tr(l, "Подключение, QR и проверка связи", "Connection, QR & Diagnostics")).size(15),
+                    row![
+                        text(format!("{}: {}", tr(l, "Мой адрес", "My address"), self.local_addr_label))
+                            .size(13)
+                            .color(ACCENT_TEAL),
+                        button(
+                            row![icon(ICON_COPY, 14.0), text(tr(l, "Копировать", "Copy")).size(12)]
+                                .spacing(5)
+                                .align_y(Alignment::Center)
+                        )
+                        .on_press(Message::CopyMyAddress)
+                        .style(secondary_btn_style),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                    text(format!(
+                        "PIN: {sec_pin} · ADB: adb reverse tcp:{} tcp:{} -> 127.0.0.1:{}",
+                        self.p2p_port, self.p2p_port, self.p2p_port
+                    ))
+                    .size(12)
+                    .color(TEXT_MUTED),
+                    row![
+                        text(tr(l, "Проверить пир:", "Ping peer:")).size(13).color(TEXT_MUTED),
+                        text_input("192.168.43.1:47789", &self.manual_addr)
+                            .on_input(Message::ManualAddrChanged)
+                            .width(200),
+                        button(
+                            row![icon(ICON_SEARCH, 14.0), text(tr(l, "Проверить связь", "Ping peer")).size(12)]
+                                .spacing(5)
+                                .align_y(Alignment::Center)
+                        )
+                        .on_press(Message::PingTarget)
+                        .style(teal_btn_style),
+                        text(&self.ping_status).size(12).color(TEXT_MUTED),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
                 ]
                 .spacing(8)
-                .align_y(Alignment::Center),
+                .width(Fill),
+                column![
+                    iced_image(self.qr_handle.clone()).width(116).height(116),
+                    text(tr(l, "Сканируйте с телефона", "Scan from phone"))
+                        .size(11)
+                        .color(TEXT_MUTED),
+                ]
+                .spacing(4)
+                .align_x(Alignment::Center),
             ]
-            .spacing(8),
+            .spacing(12)
+            .align_y(Alignment::Center),
         )
         .padding(12)
         .width(Fill)
@@ -1904,7 +2285,51 @@ impl LierSyncApp {
             );
         }
 
-        column![my_info_card, policy_card, scrollable(cards).height(Fill)]
+        let mut bt_rows = column![
+            row![
+                text("Bluetooth RFCOMM SPP").size(15),
+                Space::new().width(Fill),
+                button(text(tr(l, "Обновить", "Refresh")).size(12))
+                    .on_press(Message::RefreshBtDevices)
+                    .style(secondary_btn_style),
+                button(text(tr(l, "Буфер по BT", "Clipboard BT")).size(12))
+                    .on_press(Message::SendClipboardBluetooth)
+                    .style(teal_btn_style),
+                button(text(tr(l, "Очередь по BT", "Files BT")).size(12))
+                    .on_press(Message::SendQueueBluetooth)
+                    .style(secondary_btn_style),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(6);
+        if self.bt_devices.is_empty() {
+            bt_rows = bt_rows.push(
+                text(tr(
+                    l,
+                    "Сопряжённых Bluetooth-устройств не найдено (выполните сопряжение в Windows).",
+                    "No paired Bluetooth devices found (pair in Windows settings first).",
+                ))
+                .size(12)
+                .color(TEXT_MUTED),
+            );
+        } else {
+            for dev in &self.bt_devices {
+                let selected = dev.mac == self.selected_bt_mac;
+                bt_rows = bt_rows.push(
+                    button(text(format!("{} — {}", dev.name, dev.mac)).size(12))
+                        .on_press(Message::SelectBtDevice(dev.mac.clone()))
+                        .style(if selected {
+                            teal_btn_style
+                        } else {
+                            secondary_btn_style
+                        }),
+                );
+            }
+        }
+        let bt_card = container(bt_rows).padding(12).width(Fill).style(surface_card_style);
+
+        column![my_info_card, policy_card, bt_card, scrollable(cards).height(Fill)]
             .spacing(10)
             .into()
     }
@@ -1991,6 +2416,21 @@ impl LierSyncApp {
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
+                row![
+                    text(tr(
+                        l,
+                        "Интеграция с проводником: ПКМ -> Отправить -> LierSync.",
+                        "Windows Explorer integration: Right-click -> Send to -> LierSync.",
+                    ))
+                    .size(12)
+                    .color(TEXT_MUTED)
+                    .width(Fill),
+                    button(text(tr(l, "Добавить в «Отправить»", "Add to SendTo")).size(12))
+                        .on_press(Message::InstallSendToShortcut)
+                        .style(secondary_btn_style),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
             ]
             .spacing(10),
         )
@@ -2035,9 +2475,96 @@ impl LierSyncApp {
         .width(Fill)
         .style(surface_card_style);
 
-        column![lang_card, behavior_card, network_card]
-            .spacing(10)
-            .into()
+        let sec = self.security.snapshot();
+        let mut trusted_col = column![].spacing(6);
+        if sec.trusted_peers.is_empty() {
+            trusted_col = trusted_col.push(
+                text(tr(
+                    l,
+                    "Доверенных устройств пока нет. Выполните сопряжение по PIN или QR.",
+                    "No trusted devices yet. Pair using PIN or QR.",
+                ))
+                .size(12)
+                .color(TEXT_MUTED),
+            );
+        } else {
+            for tp in &sec.trusted_peers {
+                let key = tp.device_id.clone();
+                trusted_col = trusted_col.push(
+                    row![
+                        text(format!("{} · {} ({})", tp.device_name, tp.fingerprint, tp.added_at))
+                            .size(12)
+                            .width(Fill),
+                        button(icon(ICON_TRASH, 13.0))
+                            .on_press(Message::RemoveTrustedPeer(key))
+                            .style(crimson_btn_style),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+
+        let security_card = container(
+            column![
+                text(tr(l, "Безопасность и сопряжение", "Security & Pairing")).size(15),
+                checkbox(sec.encrypt_transport)
+                    .label(tr(
+                        l,
+                        "Шифровать соединения (X25519 + ChaCha20-Poly1305)",
+                        "Encrypt connections (X25519 + ChaCha20-Poly1305)",
+                    ))
+                    .on_toggle(Message::ToggleEncryptTransport),
+                checkbox(sec.whitelist_only)
+                    .label(tr(
+                        l,
+                        "Только доверенные устройства (белый список)",
+                        "Trusted devices only (whitelist)",
+                    ))
+                    .on_toggle(Message::ToggleWhitelistOnly),
+                row![
+                    text(format!(
+                        "{}: {}",
+                        tr(l, "PIN этого ПК", "This PC pairing PIN"),
+                        sec.pairing_pin
+                    ))
+                    .size(13)
+                    .color(ACCENT_TEAL),
+                    button(text(tr(l, "Новый PIN", "Rotate PIN")).size(12))
+                        .on_press(Message::RotatePairingPin)
+                        .style(secondary_btn_style),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+                row![
+                    text(tr(l, "Сопрячь с пиром (IP выше):", "Pair target peer (PIN):"))
+                        .size(12)
+                        .color(TEXT_MUTED),
+                    text_input("PIN", &self.pair_pin_input)
+                        .on_input(Message::PairPinInputChanged)
+                        .width(100),
+                    button(text(tr(l, "Сопрячь", "Pair")).size(12))
+                        .on_press(Message::PairTargetPeer)
+                        .style(teal_btn_style),
+                    text(&self.pair_status).size(12).color(ACCENT_TEAL),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+                rule::horizontal(1),
+                text(tr(l, "Доверенные устройства:", "Trusted devices:")).size(13),
+                trusted_col,
+            ]
+            .spacing(8),
+        )
+        .padding(14)
+        .width(Fill)
+        .style(surface_card_style);
+
+        scrollable(
+            column![lang_card, security_card, behavior_card, network_card].spacing(10),
+        )
+        .height(Fill)
+        .into()
     }
 
     fn view_about(&self) -> Element<'_, Message> {
@@ -2052,7 +2579,7 @@ impl LierSyncApp {
                     column![
                         row![
                             text("LierSync").size(22),
-                            text("v0.1.0").size(13).color(ACCENT_TEAL),
+                            text("v1.1").size(13).color(ACCENT_TEAL),
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center),
@@ -2182,6 +2709,44 @@ fn secondary_btn_style(_theme: &Theme, status: button::Status) -> button::Style 
         },
         ..button::Style::default()
     }
+}
+
+#[cfg(target_os = "windows")]
+fn install_windows_sendto() -> std::result::Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let appdata = std::env::var_os("APPDATA").ok_or_else(|| "APPDATA is not set".to_string())?;
+    let sendto_dir = std::path::PathBuf::from(appdata).join("Microsoft\\Windows\\SendTo");
+    std::fs::create_dir_all(&sendto_dir).map_err(|e| e.to_string())?;
+    let lnk_path = sendto_dir.join("LierSync.lnk");
+
+    let esc = |s: &str| s.replace('\'', "''");
+    let script = format!(
+        "$ws = New-Object -ComObject WScript.Shell; \
+         $s = $ws.CreateShortcut('{}'); \
+         $s.TargetPath = '{}'; \
+         $s.Arguments = '--send'; \
+         $s.WorkingDirectory = '{}'; \
+         $s.Description = 'Send via LierSync'; \
+         $s.Save()",
+        esc(&lnk_path.to_string_lossy()),
+        esc(&exe.to_string_lossy()),
+        esc(&exe.parent().unwrap_or(std::path::Path::new(".")).to_string_lossy()),
+    );
+
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(stderr.trim().to_string());
+    }
+    Ok(lnk_path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn install_windows_sendto() -> std::result::Result<std::path::PathBuf, String> {
+    Err("SendTo shortcut is only supported on Windows".to_string())
 }
 
 fn icon<'a>(bytes: &'static [u8], size: f32) -> svg::Svg<'a> {

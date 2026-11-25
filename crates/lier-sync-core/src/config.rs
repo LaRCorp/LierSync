@@ -113,6 +113,19 @@ pub struct SharedFolderConfig {
     pub direction: SyncDirection,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustedPeer {
+    pub device_id: String,
+    pub device_name: String,
+    pub fingerprint: String,
+    #[serde(default)]
+    pub added_at: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -129,6 +142,14 @@ pub struct AppConfig {
     pub transfer_history: Vec<TransferRecord>,
     #[serde(default)]
     pub language: AppLanguage,
+    #[serde(default = "default_true")]
+    pub encrypt_transport: bool,
+    #[serde(default)]
+    pub whitelist_only: bool,
+    #[serde(default)]
+    pub pairing_pin: String,
+    #[serde(default)]
+    pub trusted_peers: Vec<TrustedPeer>,
 }
 
 impl Default for AppConfig {
@@ -141,6 +162,10 @@ impl Default for AppConfig {
             shared_folders: Vec::new(),
             transfer_history: Vec::new(),
             language: AppLanguage::Ru,
+            encrypt_transport: true,
+            whitelist_only: false,
+            pairing_pin: String::new(),
+            trusted_peers: Vec::new(),
         }
     }
 }

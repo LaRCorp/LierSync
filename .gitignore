@@ -1,0 +1,13 @@
+/target
+/dist
+/LierSync_Inbox
+*.exe
+*.pdb
+*.log
+LRCC.txt
+lrcc
+LRCC
+*.lrcc
+.lrcc/
+.DS_Store
+Thumbs.db

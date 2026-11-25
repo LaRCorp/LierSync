@@ -1,0 +1,24 @@
+[package]
+name = "lier-sync-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core P2P, Merkle-tree sync, LAN discovery, and clipboard engine for LierSync"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
+dirs.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+socket2.workspace = true
+tracing.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "lier-sync-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Native iced desktop application for LierSync by LaRevole (LaRCorp)"
+
+[dependencies]
+lier-sync-core = { path = "../lier-sync-core" }
+iced.workspace = true
+image.workspace = true
+tray-icon.workspace = true
+rfd.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+tracing.workspace = true

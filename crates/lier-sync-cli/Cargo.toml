@@ -1,0 +1,14 @@
+[package]
+name = "lier-sync-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CLI prototype and headless daemon for LierSync"
+
+[dependencies]
+lier-sync-core = { path = "../lier-sync-core" }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true

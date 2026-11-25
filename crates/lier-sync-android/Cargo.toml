@@ -1,0 +1,19 @@
+[package]
+name = "lier-sync-android"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "JNI bridge exposing lier-sync-core to Android (Kotlin / Jetpack Compose)"
+
+[lib]
+name = "liersync_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lier-sync-core = { path = "../lier-sync-core" }
+jni = "0.21.1"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
